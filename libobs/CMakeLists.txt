@@ -151,6 +151,7 @@ target_sources(
     media-io/audio-io.c
     media-io/audio-io.h
     media-io/audio-math.h
+    media-io/asio/obs-asio-bridge.c
     media-io/audio-resampler-ffmpeg.c
     media-io/audio-resampler.h
     media-io/format-conversion.c
@@ -167,6 +168,7 @@ target_sources(
     media-io/video-matrices.c
     media-io/video-scaler-ffmpeg.c
     media-io/video-scaler.h
+    # media-io/asio/obs-asio.c will be appended conditionally below
 )
 
 target_sources(
@@ -214,6 +216,53 @@ target_sources(
     graphics/vec4.c
     graphics/vec4.h
 )
+
+# ASIO SDK detection and configuration
+if(NOT DEFINED ASIO_SDK_DIR)
+  set(ASIO_SDK_DIR "C:/SDKs/ASIOSDK" CACHE PATH "Path to ASIO SDK (asio.h)")
+endif()
+
+set(ASIO_COMMON_DIR "${ASIO_SDK_DIR}/common")
+set(ASIO_HOST_DIR "${ASIO_SDK_DIR}/host")
+set(ASIO_HOST_PC_DIR "${ASIO_HOST_DIR}/pc")
+set(
+  ASIO_SDK_SOURCES
+  "${ASIO_HOST_DIR}/asiodrivers.cpp"
+  "${ASIO_HOST_PC_DIR}/asiolist.cpp"
+)
+
+find_path(ASIO_INCLUDE_DIR asio.h PATHS ${ASIO_SDK_DIR} ${ASIO_SDK_DIR}/include ${ASIO_COMMON_DIR} NO_DEFAULT_PATH)
+
+set(ASIO_SDK_COMPLETE TRUE)
+foreach(asio_sdk_source IN LISTS ASIO_SDK_SOURCES)
+  if(NOT EXISTS "${asio_sdk_source}")
+    set(ASIO_SDK_COMPLETE FALSE)
+    break()
+  endif()
+endforeach()
+
+if(ASIO_INCLUDE_DIR AND ASIO_SDK_COMPLETE)
+  message(STATUS "ASIO SDK found: ${ASIO_INCLUDE_DIR}")
+  add_library(obs-asio-sdk OBJECT ${ASIO_SDK_SOURCES})
+  set_target_properties(obs-asio-sdk PROPERTIES COMPILE_WARNING_AS_ERROR OFF)
+  target_include_directories(obs-asio-sdk PRIVATE ${ASIO_INCLUDE_DIR} ${ASIO_HOST_DIR} ${ASIO_HOST_PC_DIR})
+  target_compile_features(obs-asio-sdk PRIVATE cxx_std_17)
+  if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(obs-asio-sdk PRIVATE /UUNICODE /U_UNICODE /wd4267)
+  endif()
+  # Add common and host include directories
+  target_include_directories(libobs PRIVATE ${ASIO_INCLUDE_DIR} ${ASIO_HOST_DIR} ${ASIO_HOST_PC_DIR})
+  target_compile_definitions(libobs PRIVATE HAVE_ASIO)
+  # Use the SDK-backed implementation
+  target_sources(libobs PRIVATE media-io/asio/obs-asio_win.cpp)
+  target_link_libraries(libobs PRIVATE obs-asio-sdk)
+elseif(ASIO_INCLUDE_DIR)
+  message(WARNING "ASIO SDK headers found at ${ASIO_INCLUDE_DIR}, but required host sources are missing; building stub ASIO support")
+  target_sources(libobs PRIVATE media-io/asio/obs-asio.c)
+else()
+  message(STATUS "ASIO SDK not found at ${ASIO_SDK_DIR}; building stub ASIO support")
+  target_sources(libobs PRIVATE media-io/asio/obs-asio.c)
+endif()
 
 # Temporarily disables deprecation warnings while obs_data_autoselect_* is deprecated.
 if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")

@@ -134,8 +134,15 @@ void OBSBasic::RenderMain(void *data, uint32_t, uint32_t)
 
 	OBSBasic *window = static_cast<OBSBasic *>(data);
 	obs_video_info ovi;
+	bool useVerticalCanvas = window->activeEditorCanvas == OBSBasic::EditorCanvasType::Vertical;
 
-	obs_get_video_info(&ovi);
+	if (useVerticalCanvas) {
+		OBSCanvas vc = window->GetVerticalCanvas();
+		if (!vc || !obs_canvas_get_video_info(vc, &ovi))
+			obs_get_video_info(&ovi);
+	} else {
+		obs_get_video_info(&ovi);
+	}
 
 	window->previewCX = int(window->previewScale * float(ovi.base_width));
 	window->previewCY = int(window->previewScale * float(ovi.base_height));
@@ -165,6 +172,16 @@ void OBSBasic::RenderMain(void *data, uint32_t, uint32_t)
 		obs_source_t *source = obs_scene_get_source(scene);
 		if (source)
 			obs_source_video_render(source);
+	} else if (useVerticalCanvas) {
+		window->DrawBackdrop(float(ovi.base_width), float(ovi.base_height));
+
+		OBSCanvas vc = window->GetVerticalCanvas();
+		if (vc) {
+			OBSScene scene = window->GetCurrentScene();
+			obs_source_t *source = obs_scene_get_source(scene);
+			obs_canvas_set_channel(vc, 0, source);
+			obs_canvas_render(vc);
+		}
 	} else {
 		obs_render_main_texture_src_color_only();
 	}

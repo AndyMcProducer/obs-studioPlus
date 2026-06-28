@@ -22,6 +22,8 @@
 
 #include "obs.h"
 #include "obs-internal.h"
+/* ASIO bridge for optional ASIO backend */
+#include "media-io/asio/obs-asio-bridge.h"
 
 struct obs_core *obs = NULL;
 
@@ -941,6 +943,8 @@ static void stop_audio(void)
 		audio_output_close(audio->audio);
 		audio->audio = NULL;
 	}
+	/* Ensure ASIO bridge is shut down if it was active */
+	obs_asio_bridge_shutdown();
 }
 
 static void obs_free_audio(void)
@@ -1608,8 +1612,11 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 		return false;
 
 	obs_free_audio();
-	if (!oai)
+	if (!oai) {
+		audio->backend = OBS_AUDIO_BACKEND_WASAPI;
+		audio->buffer_size = 0;
 		return true;
+	}
 
 	if (oai->max_buffering_ms) {
 		uint32_t max_frames = oai->max_buffering_ms * oai->samples_per_sec / SEC_TO_MSEC;
@@ -1619,6 +1626,8 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 		audio->max_buffering_ticks = 45;
 	}
 	audio->fixed_buffer = oai->fixed_buffering;
+	audio->backend = oai->backend;
+	audio->buffer_size = oai->buffer_size;
 
 	int max_buffering_ms =
 		audio->max_buffering_ticks * AUDIO_OUTPUT_FRAMES * SEC_TO_MSEC / (int)oai->samples_per_sec;
@@ -1627,7 +1636,20 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 	ai.samples_per_sec = oai->samples_per_sec;
 	ai.format = AUDIO_FORMAT_FLOAT_PLANAR;
 	ai.speakers = oai->speakers;
-	ai.input_callback = audio_callback;
+
+	/* Default to engine audio callback. If ASIO backend requested, try to
+	 * initialize the ASIO bridge and use its engine callback instead. */
+	if (oai->backend == OBS_AUDIO_BACKEND_ASIO) {
+		if (obs_asio_bridge_setup(oai->samples_per_sec, get_audio_channels(oai->speakers), oai->buffer_size)) {
+			ai.input_callback = asio_bridge_engine_callback;
+			ai.input_param = NULL;
+		} else {
+			blog(LOG_WARNING, "ASIO bridge initialization failed, falling back to default audio input");
+			ai.input_callback = audio_callback;
+		}
+	} else {
+		ai.input_callback = audio_callback;
+	}
 
 	blog(LOG_INFO, "---------------------------------");
 	blog(LOG_INFO,
@@ -1639,7 +1661,14 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 	     (int)ai.samples_per_sec, (int)ai.speakers, max_buffering_ms,
 	     oai->fixed_buffering ? "fixed" : "dynamically increasing");
 
-	return obs_init_audio(&ai);
+	bool ok = obs_init_audio(&ai);
+	if (ok && oai->backend == OBS_AUDIO_BACKEND_ASIO) {
+		/* Start ASIO streaming now that engine audio thread exists */
+		if (!obs_asio_bridge_start())
+			blog(LOG_WARNING, "ASIO bridge failed to start streaming");
+	}
+
+	return ok;
 }
 
 bool obs_reset_audio(const struct obs_audio_info *oai)

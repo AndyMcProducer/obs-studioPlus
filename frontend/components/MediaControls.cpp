@@ -7,6 +7,40 @@
 
 #include "moc_MediaControls.cpp"
 
+static bool SourceProcHasPlaylist(obs_source_t *source)
+{
+	proc_handler_t *ph;
+	calldata_t cd = {};
+	int count = 0;
+
+	if (!source)
+		return false;
+
+	ph = obs_source_get_proc_handler(source);
+	if (!ph)
+		return false;
+
+	if (proc_handler_call(ph, "get_playlist_count", &cd))
+		count = (int)calldata_int(&cd, "count");
+
+	calldata_free(&cd);
+	return count > 1;
+}
+
+static bool SourceHasPlaylist(obs_source_t *source, const char *id)
+{
+	if (!source || !id)
+		return false;
+
+	if (strcmp(id, "ffmpeg_source") == 0 || strcmp(id, "browser_playlist_source") == 0)
+		return SourceProcHasPlaylist(source);
+
+	if (strcmp(id, "ffmpeg_media_source") == 0)
+		return false;
+
+	return true;
+}
+
 void MediaControls::OBSMediaStopped(void *data, calldata_t *)
 {
 	MediaControls *media = static_cast<MediaControls *>(data);
@@ -46,6 +80,8 @@ void MediaControls::OBSMediaPrevious(void *data, calldata_t *)
 MediaControls::MediaControls(QWidget *parent) : QWidget(parent), ui(new Ui::MediaControls)
 {
 	ui->setupUi(this);
+	ui->playButton->setVisible(showDedicatedPlayButton);
+	SetPlayPauseButtonAfterStop(playPauseButtonAfterStop);
 	setFocusPolicy(Qt::StrongFocus);
 
 	connect(&mediaTimer, &QTimer::timeout, this, &MediaControls::SetSliderPosition);
@@ -93,6 +129,33 @@ bool MediaControls::MediaPaused()
 
 	obs_media_state state = obs_source_media_get_state(source);
 	return state == OBS_MEDIA_STATE_PAUSED;
+}
+
+void MediaControls::SetDedicatedPlayButtonVisible(bool visible)
+{
+	if (showDedicatedPlayButton == visible)
+		return;
+
+	showDedicatedPlayButton = visible;
+	ui->playButton->setVisible(visible);
+}
+
+void MediaControls::SetPlayPauseButtonAfterStop(bool afterStop)
+{
+	int insertIndex;
+
+	if (playPauseButtonAfterStop == afterStop)
+		return;
+
+	playPauseButtonAfterStop = afterStop;
+	ui->horizontalLayout->removeWidget(ui->playPauseButton);
+
+	if (afterStop) {
+		insertIndex = ui->horizontalLayout->indexOf(ui->stopButton) + 1;
+		ui->horizontalLayout->insertWidget(insertIndex, ui->playPauseButton);
+	} else {
+		ui->horizontalLayout->insertWidget(0, ui->playPauseButton);
+	}
 }
 
 int64_t MediaControls::GetSliderTime(int val)
@@ -262,11 +325,12 @@ void MediaControls::RefreshControls()
 		show();
 	}
 
-	bool has_playlist = strcmp(id, "ffmpeg_source") != 0;
+	bool has_playlist = SourceHasPlaylist(source, id);
+
 	ui->previousButton->setVisible(has_playlist);
 	ui->nextButton->setVisible(has_playlist);
 
-	isSlideshow = strcmp(id, "slideshow") == 0;
+	isSlideshow = id && (strcmp(id, "slideshow") == 0 || strcmp(id, "browser_playlist_source") == 0);
 	ui->slider->setVisible(!isSlideshow);
 	ui->emptySpaceAgain->setVisible(isSlideshow);
 
@@ -430,6 +494,11 @@ void MediaControls::on_stopButton_clicked()
 	StopMedia();
 }
 
+void MediaControls::on_playButton_clicked()
+{
+	PlayMedia();
+}
+
 void MediaControls::on_nextButton_clicked()
 {
 	PlaylistNext();
@@ -491,14 +560,30 @@ void MediaControls::UpdateSlideCounter()
 	proc_handler_t *ph = obs_source_get_proc_handler(source);
 	calldata_t cd = {};
 
-	proc_handler_call(ph, "current_index", &cd);
-	int slide = calldata_int(&cd, "current_index");
+	int slide = -1;
+	int total = 0;
 
-	proc_handler_call(ph, "total_files", &cd);
-	int total = calldata_int(&cd, "total_files");
+	if (proc_handler_call(ph, "get_playlist_index", &cd)) {
+		slide = calldata_int(&cd, "index");
+		calldata_free(&cd);
+		cd = {};
+
+		if (proc_handler_call(ph, "get_playlist_count", &cd))
+			total = calldata_int(&cd, "count");
+	} else {
+		calldata_free(&cd);
+		cd = {};
+
+		proc_handler_call(ph, "current_index", &cd);
+		slide = calldata_int(&cd, "current_index");
+
+		proc_handler_call(ph, "total_files", &cd);
+		total = calldata_int(&cd, "total_files");
+	}
+
 	calldata_free(&cd);
 
-	if (total > 0) {
+	if (total > 0 && slide >= 0) {
 		ui->timerLabel->setText(QString::number(slide + 1));
 		ui->durationLabel->setText(QString::number(total));
 	} else {

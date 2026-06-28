@@ -68,6 +68,25 @@ std::string getNewSourceName(std::string_view name)
 
 	return newName;
 }
+
+#ifdef _WIN32
+const char *GetInputAudioShareMode(config_t *config)
+{
+	const char *backend = config ? config_get_string(config, "Audio", "Backend") : nullptr;
+
+	if (backend && (strstr(backend, "Exclusive") || strcmp(backend, "WASAPI Exclusive") == 0))
+		return "exclusive";
+
+	return "shared";
+}
+
+uint32_t GetInputAudioBufferSize(config_t *config)
+{
+	const char *bufferSize = config ? config_get_string(config, "Audio", "BufferSize") : nullptr;
+
+	return bufferSize && *bufferSize ? (uint32_t)strtoul(bufferSize, nullptr, 10) : 0;
+}
+#endif
 } // namespace
 
 static inline bool HasAudioDevices(const char *source_id)
@@ -84,6 +103,11 @@ static inline bool HasAudioDevices(const char *source_id)
 		count = obs_property_list_item_count(devices);
 
 	return count != 0;
+}
+
+static inline bool IsPlaylistDockSourceId(const char *id)
+{
+	return id && (strcmp(id, "ffmpeg_source") == 0 || strcmp(id, "browser_playlist_source") == 0);
 }
 
 void OBSBasic::CreateFirstRunSources()
@@ -190,19 +214,38 @@ void OBSBasic::RefreshSources(OBSScene scene)
 void OBSBasic::SourceCreated(void *data, calldata_t *params)
 {
 	obs_source_t *source = (obs_source_t *)calldata_ptr(params, "source");
+	OBSBasic *window = static_cast<OBSBasic *>(data);
 
 	if (obs_scene_from_source(source) != NULL)
-		QMetaObject::invokeMethod(static_cast<OBSBasic *>(data), "AddScene", WaitConnection(),
+		QMetaObject::invokeMethod(window, "AddScene", WaitConnection(),
 					  Q_ARG(OBSSource, OBSSource(source)));
+
+	if (source && IsPlaylistDockSourceId(obs_source_get_unversioned_id(source)))
+		QMetaObject::invokeMethod(window, "RefreshMediaPlaylistDocks", Qt::QueuedConnection);
 }
 
 void OBSBasic::SourceRemoved(void *data, calldata_t *params)
 {
 	obs_source_t *source = (obs_source_t *)calldata_ptr(params, "source");
+	OBSBasic *window = static_cast<OBSBasic *>(data);
+	const char *sourceUuid = source ? obs_source_get_uuid(source) : nullptr;
 
 	if (obs_scene_from_source(source) != NULL)
-		QMetaObject::invokeMethod(static_cast<OBSBasic *>(data), "RemoveScene",
+		QMetaObject::invokeMethod(window, "RemoveScene",
 					  Q_ARG(OBSSource, OBSSource(source)));
+
+	if (source && IsPlaylistDockSourceId(obs_source_get_unversioned_id(source))) {
+		if (sourceUuid && *sourceUuid) {
+			QString playlistSourceUuid = QT_UTF8(sourceUuid);
+			QMetaObject::invokeMethod(window,
+					      [window, playlistSourceUuid]() {
+						      window->RemoveMediaPlaylistSourceDock(playlistSourceUuid);
+					      },
+					      Qt::QueuedConnection);
+		}
+
+		QMetaObject::invokeMethod(window, "RefreshMediaPlaylistDocks", Qt::QueuedConnection);
+	}
 }
 
 void OBSBasic::SourceRenamed(void *data, calldata_t *params)
@@ -210,11 +253,24 @@ void OBSBasic::SourceRenamed(void *data, calldata_t *params)
 	obs_source_t *source = (obs_source_t *)calldata_ptr(params, "source");
 	const char *newName = calldata_string(params, "new_name");
 	const char *prevName = calldata_string(params, "prev_name");
+	OBSBasic *window = static_cast<OBSBasic *>(data);
 
-	QMetaObject::invokeMethod(static_cast<OBSBasic *>(data), "RenameSources", Q_ARG(OBSSource, source),
+	QMetaObject::invokeMethod(window, "RenameSources", Q_ARG(OBSSource, source),
 				  Q_ARG(QString, QT_UTF8(newName)), Q_ARG(QString, QT_UTF8(prevName)));
 
+	if (source && IsPlaylistDockSourceId(obs_source_get_unversioned_id(source)))
+		QMetaObject::invokeMethod(window, "RefreshMediaPlaylistDocks", Qt::QueuedConnection);
+
 	blog(LOG_INFO, "Source '%s' renamed to '%s'", prevName, newName);
+}
+
+void OBSBasic::SourceChanged(void *data, calldata_t *params)
+{
+	obs_source_t *source = (obs_source_t *)calldata_ptr(params, "source");
+
+	if (source && IsPlaylistDockSourceId(obs_source_get_unversioned_id(source)))
+		QMetaObject::invokeMethod(static_cast<OBSBasic *>(data), "RefreshMediaPlaylistDocks",
+					  Qt::QueuedConnection);
 }
 
 void OBSBasic::ResetAudioDevice(const char *sourceId, const char *deviceId, const char *deviceDesc, int channel)
@@ -222,6 +278,11 @@ void OBSBasic::ResetAudioDevice(const char *sourceId, const char *deviceId, cons
 	bool disable = deviceId && strcmp(deviceId, "disabled") == 0;
 	OBSSourceAutoRelease source;
 	OBSDataAutoRelease settings;
+#ifdef _WIN32
+	const bool inputSource = sourceId && strcmp(sourceId, App()->InputAudioSource()) == 0;
+	const char *shareMode = inputSource ? GetInputAudioShareMode(activeConfiguration) : nullptr;
+	const uint32_t bufferSize = inputSource ? GetInputAudioBufferSize(activeConfiguration) : 0;
+#endif
 
 	source = obs_get_output_source(channel);
 	if (source) {
@@ -229,11 +290,30 @@ void OBSBasic::ResetAudioDevice(const char *sourceId, const char *deviceId, cons
 			obs_set_output_source(channel, nullptr);
 		} else {
 			settings = obs_source_get_settings(source);
+			bool changed = false;
 			const char *oldId = obs_data_get_string(settings, "device_id");
 			if (strcmp(oldId, deviceId) != 0) {
 				obs_data_set_string(settings, "device_id", deviceId);
-				obs_source_update(source, settings);
+				changed = true;
 			}
+
+#ifdef _WIN32
+			if (inputSource) {
+				const char *oldShareMode = obs_data_get_string(settings, "share_mode");
+				if (strcmp(oldShareMode, shareMode) != 0) {
+					obs_data_set_string(settings, "share_mode", shareMode);
+					changed = true;
+				}
+
+				if ((uint32_t)obs_data_get_int(settings, "buffer_size") != bufferSize) {
+					obs_data_set_int(settings, "buffer_size", bufferSize);
+					changed = true;
+				}
+			}
+#endif
+
+			if (changed)
+				obs_source_update(source, settings);
 		}
 
 	} else if (!disable) {
@@ -241,6 +321,12 @@ void OBSBasic::ResetAudioDevice(const char *sourceId, const char *deviceId, cons
 
 		settings = obs_data_create();
 		obs_data_set_string(settings, "device_id", deviceId);
+#ifdef _WIN32
+		if (inputSource)
+			obs_data_set_string(settings, "share_mode", shareMode);
+		if (inputSource)
+			obs_data_set_int(settings, "buffer_size", bufferSize);
+#endif
 		source = obs_source_create(sourceId, name.c_str(), settings, nullptr);
 
 		obs_set_output_source(channel, source);
@@ -1049,6 +1135,19 @@ static void SetItemTL(obs_sceneitem_t *item, const vec3 &tl)
 	obs_sceneitem_set_pos(item, &pos);
 }
 
+static bool GetSceneCanvasVideoInfo(OBSScene scene, obs_video_info &ovi)
+{
+	if (!scene)
+		return obs_get_video_info(&ovi);
+
+	obs_source_t *sceneSource = obs_scene_get_source(scene);
+	OBSCanvasAutoRelease canvas = sceneSource ? obs_source_get_canvas(sceneSource) : nullptr;
+	if (canvas && obs_canvas_get_video_info(canvas, &ovi))
+		return true;
+
+	return obs_get_video_info(&ovi);
+}
+
 static bool RotateSelectedSources(obs_scene_t * /* scene */, obs_sceneitem_t *item, void *param)
 {
 	if (obs_sceneitem_is_group(item))
@@ -1074,7 +1173,7 @@ static bool RotateSelectedSources(obs_scene_t * /* scene */, obs_sceneitem_t *it
 	SetItemTL(item, tl);
 
 	return true;
-};
+}
 
 void OBSBasic::on_actionRotate90CW_triggered()
 {
@@ -1185,7 +1284,7 @@ static bool CenterAlignSelectedItems(obs_scene_t * /* scene */, obs_sceneitem_t 
 		return true;
 
 	obs_video_info ovi;
-	obs_get_video_info(&ovi);
+	GetSceneCanvasVideoInfo(OBSBasic::Get()->GetCurrentScene(), ovi);
 
 	obs_transform_info itemInfo;
 	vec2_set(&itemInfo.pos, 0.0f, 0.0f);
@@ -1201,6 +1300,80 @@ static bool CenterAlignSelectedItems(obs_scene_t * /* scene */, obs_sceneitem_t 
 	obs_sceneitem_set_info2(item, &itemInfo);
 
 	return true;
+}
+
+static bool CenterAlignSceneItem(obs_sceneitem_t *item, obs_bounds_type boundsType)
+{
+	if (obs_sceneitem_locked(item))
+		return false;
+
+	obs_video_info ovi;
+	GetSceneCanvasVideoInfo(OBSBasic::Get()->GetCurrentScene(), ovi);
+
+	obs_transform_info itemInfo;
+	vec2_set(&itemInfo.pos, 0.0f, 0.0f);
+	vec2_set(&itemInfo.scale, 1.0f, 1.0f);
+	itemInfo.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
+	itemInfo.rot = 0.0f;
+
+	vec2_set(&itemInfo.bounds, float(ovi.base_width), float(ovi.base_height));
+	itemInfo.bounds_type = boundsType;
+	itemInfo.bounds_alignment = OBS_ALIGN_CENTER;
+	itemInfo.crop_to_bounds = obs_sceneitem_get_bounds_crop(item);
+
+	obs_sceneitem_set_info2(item, &itemInfo);
+
+	return true;
+}
+
+void OBSBasic::ApplySelectedItemScreenFit(obs_source_t *source)
+{
+	if (!source)
+		return;
+
+	OBSDataAutoRelease settings = obs_source_get_settings(source);
+	if (!obs_data_get_bool(settings, "auto_fit_to_screen") && !obs_data_get_bool(settings, "blur_fill"))
+		return;
+
+	OBSScene scene = GetCurrentScene();
+	if (!scene)
+		return;
+
+	vector<OBSSceneItem> items;
+	QModelIndexList selectedItems = GetAllSelectedSourceItems();
+
+	for (auto &selectedItem : selectedItems) {
+		OBSSceneItem item = ui->sources->Get(selectedItem.row());
+		if (item && obs_sceneitem_get_source(item) == source)
+			items.emplace_back(item);
+	}
+
+	if (items.empty()) {
+		OBSSceneItem item = GetCurrentSceneItem();
+		if (!item || obs_sceneitem_get_source(item) != source)
+			return;
+
+		items.emplace_back(item);
+	}
+
+	OBSDataAutoRelease wrapper = obs_scene_save_transform_states(scene, false);
+	bool changed = false;
+
+	for (auto &item : items)
+		changed |= CenterAlignSceneItem(item, OBS_BOUNDS_SCALE_INNER);
+
+	if (!changed)
+		return;
+
+	OBSDataAutoRelease rwrapper = obs_scene_save_transform_states(scene, false);
+	std::string undo_data(obs_data_get_json(wrapper));
+	std::string redo_data(obs_data_get_json(rwrapper));
+
+	if (undo_data != redo_data) {
+		undo_s.add_action(
+			QTStr("Undo.Transform.FitToScreen").arg(obs_source_get_name(obs_scene_get_source(scene))),
+			undo_redo, undo_redo, undo_data, redo_data);
+	}
 }
 
 void OBSBasic::on_actionFitToScreen_triggered()
@@ -1284,7 +1457,7 @@ void OBSBasic::CenterSelectedSceneItems(const CenterType &centerType)
 
 	// Get coordinates of screen center
 	obs_video_info ovi;
-	obs_get_video_info(&ovi);
+	GetSceneCanvasVideoInfo(OBSBasic::Get()->GetCurrentScene(), ovi);
 
 	vec3 screenCenter;
 	vec3_set(&screenCenter, float(ovi.base_width), float(ovi.base_height), 0.0f);

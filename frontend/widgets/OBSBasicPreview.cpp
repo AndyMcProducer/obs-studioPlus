@@ -156,13 +156,25 @@ static vec3 GetTransformedPos(float x, float y, const matrix4 &mat)
 	return result;
 }
 
+static bool GetCurrentSceneCanvasVideoInfo(obs_video_info &ovi)
+{
+	OBSBasic *main = OBSBasic::Get();
+	OBSScene scene = main ? main->GetCurrentScene() : nullptr;
+	obs_source_t *sceneSource = scene ? obs_scene_get_source(scene) : nullptr;
+	OBSCanvasAutoRelease canvas = sceneSource ? obs_source_get_canvas(sceneSource) : nullptr;
+	if (canvas && obs_canvas_get_video_info(canvas, &ovi))
+		return true;
+
+	return obs_get_video_info(&ovi);
+}
+
 static inline vec2 GetOBSScreenSize()
 {
 	obs_video_info ovi;
 	vec2 size;
 	vec2_zero(&size);
 
-	if (obs_get_video_info(&ovi)) {
+	if (GetCurrentSceneCanvasVideoInfo(ovi)) {
 		size.x = float(ovi.base_width);
 		size.y = float(ovi.base_height);
 	}
@@ -2342,7 +2354,8 @@ static void RenderSpacingHelper(int sourceIndex, vec3 &start, vec3 &end, vec3 &v
 	float length = vec3_dist(&start, &end);
 
 	obs_video_info ovi;
-	obs_get_video_info(&ovi);
+	if (!GetCurrentSceneCanvasVideoInfo(ovi))
+		return;
 
 	float px;
 
@@ -2420,7 +2433,8 @@ void OBSBasicPreview::DrawSpacingHelpers()
 	obs_sceneitem_get_info2(item, &oti);
 
 	obs_video_info ovi;
-	obs_get_video_info(&ovi);
+	if (!GetCurrentSceneCanvasVideoInfo(ovi))
+		return;
 
 	vec3 size;
 	vec3_set(&size, ovi.base_width, ovi.base_height, 1.0f);
@@ -2552,7 +2566,8 @@ void OBSBasicPreview::DrawSpacingHelpers()
 void OBSBasicPreview::ClampScrollingOffsets()
 {
 	obs_video_info ovi;
-	obs_get_video_info(&ovi);
+	if (!GetCurrentSceneCanvasVideoInfo(ovi))
+		return;
 
 	QSize targetSize = GetPixelSize(this);
 

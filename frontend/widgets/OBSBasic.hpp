@@ -55,6 +55,7 @@ class OBSBasicProperties;
 class OBSBasicSourceSelect;
 class OBSBasicTransform;
 class OBSLogViewer;
+class MediaPlaylistWidget;
 class OBSMissingFiles;
 class OBSProjector;
 class VolumeControl;
@@ -435,6 +436,11 @@ public slots:
 	 */
 private:
 	QPointer<QDockWidget> statsDock;
+	QPointer<OBSDock> mediaPlaylistDock;
+	QPointer<MediaPlaylistWidget> mediaPlaylistWidget;
+	QPointer<QMenu> mediaPlaylistMenu;
+	QStringList mediaPlaylistDockUuids;
+	QList<QPointer<OBSDock>> mediaPlaylistSourceDocks;
 	QByteArray startingDockLayout;
 	QStringList extraDockNames;
 	QList<std::shared_ptr<QDockWidget>> extraDocks;
@@ -451,6 +457,10 @@ public:
 	bool IsDockObjectNameUsed(const QString &name);
 	void AddCustomDockWidget(QDockWidget *dock);
 	void setDockCornersVertical(bool vertical);
+	void AddMediaPlaylistSourceDock(const QString &sourceUuid, bool show);
+	void RemoveMediaPlaylistSourceDock(const QString &sourceUuid);
+	void LoadMediaPlaylistDocks();
+	void SaveMediaPlaylistDocks();
 
 private slots:
 	void on_resetDocks_triggered(bool force = false);
@@ -1064,6 +1074,7 @@ signals:
 	 */
 private:
 	OBSDataAutoRelease collectionModuleData;
+	OBSDataAutoRelease deferredGlobalAudioSources[6];
 	long disableSaving = 1;
 	bool projectChanged = false;
 	bool clearingFailed = false;
@@ -1135,9 +1146,20 @@ public:
 	 */
 private:
 	std::vector<OBS::Canvas> canvases;
+	enum class EditorCanvasType { Horizontal, Vertical };
+	EditorCanvasType activeEditorCanvas = EditorCanvasType::Horizontal;
+	std::string verticalCanvasUuid;
+	std::string verticalCurrentSceneUuid;
+	std::vector<std::string> verticalSceneOrder;
+	std::vector<std::shared_ptr<OBSSignal>> sceneListSignals;
 
 	static void CanvasRemoved(void *data, calldata_t *params);
 	void ClearCanvases();
+	OBSCanvas GetVerticalCanvas() const;
+	void EnsureVerticalCanvas();
+	void SyncVerticalCanvasVideoInfo();
+	void SwitchEditorCanvas(EditorCanvasType type);
+	void RefreshSceneListForCanvas();
 
 public:
 	const std::vector<OBS::Canvas> &GetCanvases() const noexcept { return canvases; }
@@ -1173,10 +1195,12 @@ private:
 	static void SourceCreated(void *data, calldata_t *params);
 	static void SourceRemoved(void *data, calldata_t *params);
 	static void SourceRenamed(void *data, calldata_t *params);
+	static void SourceChanged(void *data, calldata_t *params);
 
 private slots:
 	void AddSourceDialog();
 	void RenameSources(OBSSource source, QString newName, QString prevName);
+	void RefreshMediaPlaylistDocks();
 
 	void ReorderSources(OBSScene scene);
 	void RefreshSources(OBSScene scene);
@@ -1230,6 +1254,7 @@ private slots:
 
 public:
 	void ResetAudioDevice(const char *sourceId, const char *deviceId, const char *deviceDesc, int channel);
+	void ApplySelectedItemScreenFit(obs_source_t *source);
 
 	QMenu *AddDeinterlacingMenu(QMenu *menu, obs_source_t *source);
 	QMenu *AddScaleFilteringMenu(QMenu *menu, obs_sceneitem_t *item);

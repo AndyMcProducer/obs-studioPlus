@@ -28,6 +28,7 @@
 #include <components/GameCaptureToolbar.hpp>
 #include <components/ImageSourceToolbar.hpp>
 #include <components/MediaControls.hpp>
+#include <components/MediaPlaylistWidget.hpp>
 #include <components/TextSourceToolbar.hpp>
 #include <components/WindowCaptureToolbar.hpp>
 
@@ -88,9 +89,14 @@ void OBSBasic::UpdateContextBarVisibility()
 	UpdateContextBarDeferred();
 }
 
+static bool is_ffmpeg_media_source_id(const char *id)
+{
+	return id && (strcmp(id, "ffmpeg_source") == 0 || strcmp(id, "ffmpeg_media_source") == 0);
+}
+
 static bool is_network_media_source(obs_source_t *source, const char *id)
 {
-	if (strcmp(id, "ffmpeg_source") != 0)
+	if (!is_ffmpeg_media_source_id(id))
 		return false;
 
 	OBSDataAutoRelease s = obs_source_get_settings(source);
@@ -138,6 +144,10 @@ void OBSBasic::UpdateContextBar(bool force)
 		return;
 
 	OBSSceneItem item = GetCurrentSceneItem();
+	if (mediaPlaylistWidget) {
+		OBSSource playlistSource = item ? obs_sceneitem_get_source(item) : nullptr;
+		mediaPlaylistWidget->SetSource(playlistSource);
+	}
 
 	if (item) {
 		obs_source_t *source = obs_sceneitem_get_source(item);

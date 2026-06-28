@@ -12,6 +12,7 @@ uniform float2 base_dimension;
 uniform float2 base_dimension_i;
 uniform float undistort_factor = 1.0;
 uniform float multiplier;
+uniform float opacity = 1.0;
 
 sampler_state textureSampler {
 	Filter    = Linear;
@@ -134,14 +135,14 @@ float4 DrawBicubic(FragData f_in, bool undistort)
 
 float4 PSDrawBicubicRGBA(FragData f_in, bool undistort) : TARGET
 {
-	return DrawBicubic(f_in, undistort);
+	return DrawBicubic(f_in, undistort) * opacity;
 }
 
 float4 PSDrawBicubicRGBAMultiply(FragData f_in, bool undistort) : TARGET
 {
 	float4 rgba = DrawBicubic(f_in, undistort);
 	rgba.rgb *= multiplier;
-	return rgba;
+	return rgba * opacity;
 }
 
 float4 PSDrawBicubicRGBATonemap(FragData f_in, bool undistort) : TARGET
@@ -150,7 +151,7 @@ float4 PSDrawBicubicRGBATonemap(FragData f_in, bool undistort) : TARGET
 	rgba.rgb = rec709_to_rec2020(rgba.rgb);
 	rgba.rgb = reinhard(rgba.rgb);
 	rgba.rgb = rec2020_to_rec709(rgba.rgb);
-	return rgba;
+	return rgba * opacity;
 }
 
 float4 PSDrawBicubicRGBAMultiplyTonemap(FragData f_in, bool undistort) : TARGET
@@ -160,7 +161,7 @@ float4 PSDrawBicubicRGBAMultiplyTonemap(FragData f_in, bool undistort) : TARGET
 	rgba.rgb = rec709_to_rec2020(rgba.rgb);
 	rgba.rgb = reinhard(rgba.rgb);
 	rgba.rgb = rec2020_to_rec709(rgba.rgb);
-	return rgba;
+	return rgba * opacity;
 }
 
 technique Draw

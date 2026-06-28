@@ -49,6 +49,10 @@ struct obs_scene_item {
 	bool locked;
 
 	gs_texrender_t *item_render;
+	gs_texrender_t *ffmpeg_transition_render;
+	uint64_t ffmpeg_transition_serial;
+	uint64_t ffmpeg_transition_start_ns;
+	enum gs_color_space ffmpeg_transition_space;
 	struct obs_sceneitem_crop crop;
 
 	bool absolute_coordinates;

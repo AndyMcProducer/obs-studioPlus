@@ -331,6 +331,8 @@ void OBSBasicProperties::on_buttonBox_clicked(QAbstractButton *button)
 		if (view->DeferUpdate())
 			view->UpdateSettings();
 
+		main->ApplySelectedItemScreenFit(source);
+
 	} else if (val == QDialogButtonBox::RejectRole) {
 		OBSDataAutoRelease settings = obs_source_get_settings(source);
 		obs_data_clear(settings);

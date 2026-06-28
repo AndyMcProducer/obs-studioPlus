@@ -2087,7 +2087,7 @@
                 <property name="title">
                  <string>Basic.Settings.Stream.WHIPSimulcastLabel</string>
                 </property>
-                <layout class="QVBoxLayout" name="verticalLayout_35">
+                <layout class="QVBoxLayout" name="verticalLayout_351">
                  <property name="leftMargin">
                   <number>9</number>
                  </property>
@@ -5951,6 +5951,118 @@
                    <property name="topMargin">
                     <number>2</number>
                    </property>
+                    <item row="0" column="0">
+                     <widget class="QLabel" name="audioBackendLabel">
+                      <property name="minimumSize">
+                       <size>
+                        <width>170</width>
+                        <height>0</height>
+                       </size>
+                      </property>
+                      <property name="text">
+                       <string>Audio Backend</string>
+                      </property>
+                      <property name="alignment">
+                       <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+                      </property>
+                      <property name="buddy">
+                       <cstring>audioBackend</cstring>
+                      </property>
+                     </widget>
+                    </item>
+                    <item row="0" column="1">
+                     <widget class="QComboBox" name="audioBackend">
+                      <property name="currentText">
+                       <string notr="true">WDM (Windows Audio)</string>
+                      </property>
+                      <property name="currentIndex">
+                       <number>0</number>
+                      </property>
+                      <item>
+                       <property name="text">
+                        <string notr="true">WDM (Windows Audio)</string>
+                       </property>
+                      </item>
+                      <item>
+                       <property name="text">
+                        <string notr="true">ASIO</string>
+                       </property>
+                      </item>
+                      <item>
+                       <property name="text">
+                        <string notr="true">Windows Exclusive</string>
+                       </property>
+                      </item>
+                     </widget>
+                    </item>
+                    <item row="1" column="0">
+                     <widget class="QLabel" name="bufferSizeLabel">
+                      <property name="text">
+                       <string>Buffer Size (Exclusive Mode)</string>
+                      </property>
+                      <property name="buddy">
+                       <cstring>bufferSize</cstring>
+                      </property>
+                     </widget>
+                    </item>
+                    <item row="1" column="1">
+                     <widget class="QComboBox" name="bufferSize">
+                      <property name="enabled">
+                       <bool>false</bool>
+                      </property>
+                      <item>
+                       <property name="text">
+                        <string notr="true">128</string>
+                       </property>
+                      </item>
+                      <item>
+                       <property name="text">
+                        <string notr="true">256</string>
+                       </property>
+                      </item>
+                      <item>
+                       <property name="text">
+                        <string notr="true">512</string>
+                       </property>
+                      </item>
+                      <item>
+                       <property name="text">
+                        <string notr="true">1024</string>
+                       </property>
+                      </item>
+                      <item>
+                       <property name="text">
+                        <string notr="true">2048</string>
+                       </property>
+                      </item>
+                     </widget>
+                    </item>
+                     <!-- ASIO Device Selection -->
+                     <item row="2" column="0">
+                      <widget class="QLabel" name="label_asioDevice">
+                       <property name="text">
+                        <string>ASIO Device</string>
+                       </property>
+                       <property name="buddy">
+                        <cstring>asioDeviceComboBox</cstring>
+                       </property>
+                      </widget>
+                     </item>
+                     <item row="2" column="1">
+                      <widget class="QComboBox" name="asioDeviceComboBox">
+                       <property name="enabled">
+                        <bool>true</bool>
+                       </property>
+                      </widget>
+                     </item>
+                     <!-- ASIO Control Panel Button -->
+                     <item row="2" column="2">
+                      <widget class="QPushButton" name="asioControlPanelButton">
+                       <property name="text">
+                        <string>ASIO Control Panel</string>
+                       </property>
+                      </widget>
+                     </item>
                    <item row="0" column="0">
                     <widget class="QLabel" name="label_14">
                      <property name="minimumSize">

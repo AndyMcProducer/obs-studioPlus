@@ -48,6 +48,8 @@ target_sources(
     components/ImageSourceToolbar.hpp
     components/MediaControls.cpp
     components/MediaControls.hpp
+    components/MediaPlaylistWidget.cpp
+    components/MediaPlaylistWidget.hpp
     components/MenuButton.cpp
     components/MenuButton.hpp
     components/MenuCheckBox.cpp

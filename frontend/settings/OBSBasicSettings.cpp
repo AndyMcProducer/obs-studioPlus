@@ -17,6 +17,7 @@
  ******************************************************************************/
 
 #include "OBSBasicSettings.hpp"
+#include "../../libobs/media-io/asio/obs-asio.h"
 #include "OBSHotkeyLabel.hpp"
 #include "OBSHotkeyWidget.hpp"
 
@@ -108,6 +109,252 @@ static bool ConvertResText(const char *res, uint32_t &cx, uint32_t &cy)
 	return true;
 }
 
+// --- Audio Backend/Buffer Size logic ---
+static constexpr const char *kAsioRouteIdKeys[] = {
+	"ASIODesktopAudioDevice1Id",
+	"ASIODesktopAudioDevice2Id",
+	"ASIOAuxAudioDevice1Id",
+	"ASIOAuxAudioDevice2Id",
+	"ASIOAuxAudioDevice3Id",
+	"ASIOAuxAudioDevice4Id",
+};
+
+static constexpr const char *kAsioRouteNameKeys[] = {
+	"ASIODesktopAudioDevice1Name",
+	"ASIODesktopAudioDevice2Name",
+	"ASIOAuxAudioDevice1Name",
+	"ASIOAuxAudioDevice2Name",
+	"ASIOAuxAudioDevice3Name",
+	"ASIOAuxAudioDevice4Name",
+};
+
+static constexpr const char *kAsioMonitoringOutputIdKey = "ASIOMonitoringOutputId";
+static constexpr const char *kAsioMonitoringOutputNameKey = "ASIOMonitoringOutputName";
+
+static inline QString MakeAsioPairData(int left, int right)
+{
+	if (right >= 0)
+		return QStringLiteral("%1,%2").arg(left).arg(right);
+
+	return QString::number(left);
+}
+
+static inline bool IsAsioBackendText(const QString &backend)
+{
+	return backend.contains("ASIO", Qt::CaseInsensitive);
+}
+
+static inline bool IsExclusiveBackendText(const QString &backend)
+{
+	return backend.contains("Exclusive", Qt::CaseInsensitive);
+}
+
+static inline QString AudioBackendConfigValue(const QString &backend)
+{
+	if (IsAsioBackendText(backend))
+		return QStringLiteral("ASIO");
+	if (IsExclusiveBackendText(backend))
+		return QStringLiteral("WASAPI Exclusive");
+	return QStringLiteral("WASAPI");
+}
+
+static inline QString AudioBackendDisplayValue(const QString &backend)
+{
+	if (IsAsioBackendText(backend))
+		return QStringLiteral("ASIO");
+	if (IsExclusiveBackendText(backend))
+		return QStringLiteral("Windows Exclusive");
+	if (backend.compare(QStringLiteral("WASAPI"), Qt::CaseInsensitive) == 0 ||
+	    backend.contains("WDM", Qt::CaseInsensitive) || backend.isEmpty()) {
+		return QStringLiteral("WDM (Windows Audio)");
+	}
+
+	return backend;
+}
+
+static inline void SetComboPlaceholder(QComboBox *combo, const QString &text)
+{
+	bool blocked = combo->blockSignals(true);
+	combo->clear();
+	combo->addItem(text, QString());
+	combo->setCurrentIndex(0);
+	combo->blockSignals(blocked);
+}
+
+void OBSBasicSettings::RestoreMonitoringDeviceSelection()
+{
+	if (!obs_audio_monitoring_available() || !ui->monitoringDevice)
+		return;
+
+	QString monDevName;
+	QString monDevId;
+#ifdef _WIN32
+	const bool asioBackend = IsAsioBackendText(ui->audioBackend->currentText());
+	monDevName = config_get_string(main->Config(), "Audio",
+				     asioBackend ? kAsioMonitoringOutputNameKey : "MonitoringDeviceName");
+	monDevId = config_get_string(main->Config(), "Audio",
+				   asioBackend ? kAsioMonitoringOutputIdKey : "MonitoringDeviceId");
+#else
+	monDevName = config_get_string(main->Config(), "Audio", "MonitoringDeviceName");
+	monDevId = config_get_string(main->Config(), "Audio", "MonitoringDeviceId");
+#endif
+
+	int idx = ui->monitoringDevice->findData(monDevId);
+	if (idx != -1) {
+		ui->monitoringDevice->setCurrentIndex(idx);
+		return;
+	}
+
+	if (monDevId.isEmpty())
+		return;
+
+	ui->monitoringDevice->insertItem(0, monDevName, monDevId);
+
+	QStandardItemModel *model = dynamic_cast<QStandardItemModel *>(ui->monitoringDevice->model());
+	if (model) {
+		QStandardItem *item = model->item(0);
+		if (item)
+			item->setFlags(Qt::NoItemFlags);
+	}
+
+	ui->monitoringDevice->setCurrentIndex(0);
+}
+
+void OBSBasicSettings::RefreshAudioBackendDeviceLists(bool asioBackend)
+{
+	QComboBox *const audioDeviceCombos[] = {
+		ui->desktopAudioDevice1,
+		ui->desktopAudioDevice2,
+		ui->auxAudioDevice1,
+		ui->auxAudioDevice2,
+		ui->auxAudioDevice3,
+		ui->auxAudioDevice4,
+	};
+
+	if (asioBackend) {
+		for (QComboBox *combo : audioDeviceCombos)
+			combo->setEnabled(true);
+
+		if (obs_audio_monitoring_available() && ui->monitoringDevice)
+			ui->monitoringDevice->setEnabled(true);
+
+		LoadAsioAudioDevices();
+
+		return;
+	}
+
+	for (QComboBox *combo : audioDeviceCombos)
+		combo->setEnabled(true);
+
+	LoadAudioDevices();
+
+	if (obs_audio_monitoring_available() && ui->monitoringDevice) {
+		ui->monitoringDevice->setEnabled(true);
+		FillAudioMonitoringDevices();
+		RestoreMonitoringDeviceSelection();
+	}
+}
+
+void OBSBasicSettings::UpdateAudioRestartBaseline()
+{
+	channelIndex = ui->channelSetup->currentIndex();
+	sampleRateIndex = ui->sampleRate->currentIndex();
+	llBufferingEnabled = ui->lowLatencyBuffering->isChecked();
+	initialAudioBackend = ui->audioBackend->currentText();
+	initialAudioBufferSize = ui->bufferSize->currentText();
+	initialAsioDevice = ui->asioDeviceComboBox->currentText();
+}
+
+void OBSBasicSettings::OnAudioBackendChanged(int idx)
+{
+	QString backend = ui->audioBackend->itemText(idx);
+	bool enableBuffer = IsExclusiveBackendText(backend);
+	ui->bufferSize->setEnabled(enableBuffer);
+
+	bool isAsio = IsAsioBackendText(backend);
+	QString currentAsioDevice = ui->asioDeviceComboBox->currentText();
+	if (ui->asioDeviceComboBox->count() == 0 || isAsio) {
+		PopulateAsioDevices();
+		if (!currentAsioDevice.isEmpty()) {
+			int asioIdx = ui->asioDeviceComboBox->findText(currentAsioDevice);
+			if (asioIdx != -1)
+				ui->asioDeviceComboBox->setCurrentIndex(asioIdx);
+		}
+	}
+
+	ui->asioDeviceComboBox->setEnabled(isAsio);
+	ui->asioControlPanelButton->setEnabled(isAsio && ui->asioDeviceComboBox->count() != 0);
+
+	bool previousLoading = loading;
+	loading = true;
+	RefreshAudioBackendDeviceLists(isAsio);
+	loading = previousLoading;
+}
+
+// --- ASIO Device/Control Panel logic ---
+void OBSBasicSettings::PopulateAsioDevices()
+{
+	ui->asioDeviceComboBox->clear();
+	int count = obs_asio_get_device_count();
+	for (int i = 0; i < count; ++i) {
+		const char *name = obs_asio_get_device_name(i);
+		if (name)
+			ui->asioDeviceComboBox->addItem(QString::fromUtf8(name));
+	}
+}
+
+void OBSBasicSettings::on_asioControlPanelButton_clicked()
+{
+	QString device = ui->asioDeviceComboBox->currentText();
+	if (!device.isEmpty()) {
+		if (!obs_asio_open_control_panel(device.toUtf8().constData())) {
+			QMessageBox::warning(this, "ASIO Control Panel", "Failed to open control panel for: " + device);
+		}
+	}
+}
+
+void OBSBasicSettings::LoadAudioBackendSettings()
+{
+	bool previousLoading = loading;
+	loading = true;
+
+	QString backend = AudioBackendDisplayValue(QString::fromUtf8(config_get_string(main->Config(), "Audio", "Backend")));
+	QString bufferSize = QString::fromUtf8(config_get_string(main->Config(), "Audio", "BufferSize"));
+	QString asioDevice = QString::fromUtf8(config_get_string(main->Config(), "Audio", "ASIODevice"));
+
+	int backendIdx = ui->audioBackend->findText(backend);
+	if (backendIdx == -1)
+		backendIdx = 0;
+	ui->audioBackend->setCurrentIndex(backendIdx);
+
+	PopulateAsioDevices();
+	if (!asioDevice.isEmpty()) {
+		int asioIdx = ui->asioDeviceComboBox->findText(asioDevice);
+		if (asioIdx != -1)
+			ui->asioDeviceComboBox->setCurrentIndex(asioIdx);
+	}
+
+	int bufIdx = ui->bufferSize->findText(bufferSize);
+	if (bufIdx != -1)
+		ui->bufferSize->setCurrentIndex(bufIdx);
+
+	OnAudioBackendChanged(ui->audioBackend->currentIndex());
+
+	loading = previousLoading;
+	UpdateAudioRestartBaseline();
+}
+
+void OBSBasicSettings::SaveAudioBackendSettings()
+{
+	QString backend = AudioBackendConfigValue(ui->audioBackend->currentText());
+	QString bufferSize = ui->bufferSize->currentText();
+	QString asioDevice = ui->asioDeviceComboBox->currentText();
+
+	config_set_string(main->Config(), "Audio", "Backend", backend.toUtf8().constData());
+	config_set_string(main->Config(), "Audio", "BufferSize", bufferSize.toUtf8().constData());
+	config_set_string(main->Config(), "Audio", "ASIODevice", asioDevice.toUtf8().constData());
+}
+
 static inline bool WidgetChanged(QWidget *widget)
 {
 	return widget->property("changed").toBool();
@@ -129,6 +376,86 @@ static inline bool SetComboByValue(QComboBox *combo, const QString &name)
 	}
 
 	return false;
+}
+
+void OBSBasicSettings::LoadAsioChannelPairs(QComboBox *widget, bool input, const char *idKey, const char *nameKey)
+{
+	bool blocked = widget->blockSignals(true);
+	widget->clear();
+	widget->addItem(QTStr("Basic.Settings.Audio.Disabled"), "disabled");
+
+	const QString device = ui->asioDeviceComboBox->currentText();
+	obs_asio_set_selected_device(device.isEmpty() ? nullptr : QT_TO_UTF8(device));
+
+	const int count = input ? obs_asio_get_input_channel_count() : obs_asio_get_output_channel_count();
+	auto getChannelName = [input](int channel) {
+		const char *channelName =
+			input ? obs_asio_get_input_channel_name(channel) : obs_asio_get_output_channel_name(channel);
+		return channelName ? QString::fromUtf8(channelName) : QString("Channel %1").arg(channel + 1);
+	};
+
+	if (input) {
+		for (int i = 0; i < count; ++i)
+			widget->addItem(QStringLiteral("Mono: %1").arg(getChannelName(i)), MakeAsioPairData(i, -1));
+	}
+
+	for (int i = 0; i < count; i += 2) {
+		QString leftName = getChannelName(i);
+		QString label = leftName;
+
+		if (i + 1 < count)
+			label = QStringLiteral("%1 / %2").arg(leftName, getChannelName(i + 1));
+		if (input && i + 1 < count)
+			label = QStringLiteral("Stereo: %1").arg(label);
+
+		widget->addItem(label, MakeAsioPairData(i, i + 1 < count ? i + 1 : -1));
+	}
+
+	QString savedId = config_get_string(main->Config(), "Audio", idKey);
+	QString savedName = config_get_string(main->Config(), "Audio", nameKey);
+	if (!savedId.isEmpty()) {
+		int idx = widget->findData(savedId);
+		if (idx != -1) {
+			widget->setCurrentIndex(idx);
+		} else {
+			widget->insertItem(0, savedName.isEmpty() ? savedId : savedName, savedId);
+			widget->setCurrentIndex(0);
+		}
+	} else {
+		widget->setCurrentIndex(0);
+	}
+
+	widget->blockSignals(blocked);
+}
+
+void OBSBasicSettings::LoadAsioAudioDevices()
+{
+	if (!IsAsioBackendText(ui->audioBackend->currentText()))
+		return;
+
+	const QString device = ui->asioDeviceComboBox->currentText();
+	if (device.isEmpty()) {
+		SetComboPlaceholder(ui->desktopAudioDevice1, QStringLiteral("Select an ASIO device first"));
+		SetComboPlaceholder(ui->desktopAudioDevice2, QStringLiteral("Select an ASIO device first"));
+		SetComboPlaceholder(ui->auxAudioDevice1, QStringLiteral("Select an ASIO device first"));
+		SetComboPlaceholder(ui->auxAudioDevice2, QStringLiteral("Select an ASIO device first"));
+		SetComboPlaceholder(ui->auxAudioDevice3, QStringLiteral("Select an ASIO device first"));
+		SetComboPlaceholder(ui->auxAudioDevice4, QStringLiteral("Select an ASIO device first"));
+		if (obs_audio_monitoring_available() && ui->monitoringDevice)
+			SetComboPlaceholder(ui->monitoringDevice, QStringLiteral("Select an ASIO device first"));
+		return;
+	}
+
+	LoadAsioChannelPairs(ui->desktopAudioDevice1, true, kAsioRouteIdKeys[0], kAsioRouteNameKeys[0]);
+	LoadAsioChannelPairs(ui->desktopAudioDevice2, true, kAsioRouteIdKeys[1], kAsioRouteNameKeys[1]);
+	LoadAsioChannelPairs(ui->auxAudioDevice1, true, kAsioRouteIdKeys[2], kAsioRouteNameKeys[2]);
+	LoadAsioChannelPairs(ui->auxAudioDevice2, true, kAsioRouteIdKeys[3], kAsioRouteNameKeys[3]);
+	LoadAsioChannelPairs(ui->auxAudioDevice3, true, kAsioRouteIdKeys[4], kAsioRouteNameKeys[4]);
+	LoadAsioChannelPairs(ui->auxAudioDevice4, true, kAsioRouteIdKeys[5], kAsioRouteNameKeys[5]);
+
+	if (obs_audio_monitoring_available() && ui->monitoringDevice)
+		LoadAsioChannelPairs(ui->monitoringDevice, false, kAsioMonitoringOutputIdKey,
+				     kAsioMonitoringOutputNameKey);
 }
 
 static inline bool SetInvalidValue(QComboBox *combo, const QString &name, const QVariant &data)
@@ -329,6 +656,19 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 
 	ui->listWidget->setAttribute(Qt::WA_MacShowFocusRect, false);
 
+	// --- Audio Backend/Buffer Size wiring ---
+	connect(ui->audioBackend, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &OBSBasicSettings::OnAudioBackendChanged);
+	connect(ui->asioDeviceComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+		[this](int) {
+			if (!IsAsioBackendText(ui->audioBackend->currentText()))
+				return;
+
+			LoadAsioAudioDevices();
+		});
+
+	// Initial enable/disable state for buffer size
+	OnAudioBackendChanged(ui->audioBackend->currentIndex());
+
 	/* clang-format off */
 	HookWidget(ui->language,             COMBO_CHANGED,  GENERAL_CHANGED);
 	HookWidget(ui->updateChannelBox,     COMBO_CHANGED,  GENERAL_CHANGED);
@@ -499,6 +839,9 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	HookWidget(ui->advRBMegsMax,         SCROLL_CHANGED, OUTPUTS_CHANGED);
 	HookWidget(ui->channelSetup,         COMBO_CHANGED,  AUDIO_RESTART);
 	HookWidget(ui->sampleRate,           COMBO_CHANGED,  AUDIO_RESTART);
+	HookWidget(ui->audioBackend,         COMBO_CHANGED,  AUDIO_RESTART);
+	HookWidget(ui->bufferSize,           COMBO_CHANGED,  AUDIO_RESTART);
+	HookWidget(ui->asioDeviceComboBox,   COMBO_CHANGED,  AUDIO_RESTART);
 	HookWidget(ui->meterDecayRate,       COMBO_CHANGED,  AUDIO_CHANGED);
 	HookWidget(ui->peakMeterType,        COMBO_CHANGED,  AUDIO_CHANGED);
 	HookWidget(ui->desktopAudioDevice1,  COMBO_CHANGED,  AUDIO_CHANGED);
@@ -883,9 +1226,7 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 
 	App()->DisableHotkeys();
 
-	channelIndex = ui->channelSetup->currentIndex();
-	sampleRateIndex = ui->sampleRate->currentIndex();
-	llBufferingEnabled = ui->lowLatencyBuffering->isChecked();
+	UpdateAudioRestartBaseline();
 
 	QRegularExpression rx("\\d{1,5}x\\d{1,5}");
 	QValidator *validator = new QRegularExpressionValidator(rx, this);
@@ -2276,6 +2617,13 @@ void OBSBasicSettings::LoadListValues(QComboBox *widget, obs_property_t *prop, i
 
 void OBSBasicSettings::LoadAudioDevices()
 {
+	ui->desktopAudioDevice1->clear();
+	ui->desktopAudioDevice2->clear();
+	ui->auxAudioDevice1->clear();
+	ui->auxAudioDevice2->clear();
+	ui->auxAudioDevice3->clear();
+	ui->auxAudioDevice4->clear();
+
 	const char *input_id = App()->InputAudioSource();
 	const char *output_id = App()->OutputAudioSource();
 
@@ -2509,6 +2857,9 @@ void OBSBasicSettings::UpdateColorFormatSpaceWarning()
 
 void OBSBasicSettings::LoadAdvancedSettings()
 {
+	const bool asioBackend =
+		QString::fromUtf8(config_get_string(main->Config(), "Audio", "Backend")).compare(QStringLiteral("ASIO"),
+											 Qt::CaseInsensitive) == 0;
 	const char *videoColorFormat = config_get_string(main->Config(), "Video", "ColorFormat");
 	const char *videoColorSpace = config_get_string(main->Config(), "Video", "ColorSpace");
 	const char *videoColorRange = config_get_string(main->Config(), "Video", "ColorRange");
@@ -2518,8 +2869,10 @@ void OBSBasicSettings::LoadAdvancedSettings()
 	QString monDevName;
 	QString monDevId;
 	if (obs_audio_monitoring_available()) {
-		monDevName = config_get_string(main->Config(), "Audio", "MonitoringDeviceName");
-		monDevId = config_get_string(main->Config(), "Audio", "MonitoringDeviceId");
+		monDevName = config_get_string(main->Config(), "Audio",
+					       asioBackend ? kAsioMonitoringOutputNameKey : "MonitoringDeviceName");
+		monDevId = config_get_string(main->Config(), "Audio",
+					     asioBackend ? kAsioMonitoringOutputIdKey : "MonitoringDeviceId");
 	}
 	bool enableDelay = config_get_bool(main->Config(), "Output", "DelayEnable");
 	int delaySec = config_get_int(main->Config(), "Output", "DelaySec");
@@ -2923,6 +3276,8 @@ void OBSBasicSettings::LoadSettings(bool changedOnly)
 		LoadAppearanceSettings();
 	if (!changedOnly || advancedChanged)
 		LoadAdvancedSettings();
+	if (!changedOnly || audioChanged || advancedChanged)
+		LoadAudioBackendSettings();
 }
 
 void OBSBasicSettings::SaveGeneralSettings()
@@ -3139,7 +3494,9 @@ void OBSBasicSettings::SaveVideoSettings()
 
 void OBSBasicSettings::SaveAdvancedSettings()
 {
-	QString lastMonitoringDevice = config_get_string(main->Config(), "Audio", "MonitoringDeviceId");
+	bool asioBackend = IsAsioBackendText(ui->audioBackend->currentText());
+	QString lastMonitoringDevice = config_get_string(main->Config(), "Audio",
+				       asioBackend ? kAsioMonitoringOutputIdKey : "MonitoringDeviceId");
 
 #if defined(_WIN32) || (defined(__APPLE__) && defined(__aarch64__))
 	if (WidgetChanged(ui->renderer)) {
@@ -3183,8 +3540,15 @@ void OBSBasicSettings::SaveAdvancedSettings()
 	SaveSpinBox(ui->sdrWhiteLevel, "Video", "SdrWhiteLevel");
 	SaveSpinBox(ui->hdrNominalPeakLevel, "Video", "HdrNominalPeakLevel");
 	if (obs_audio_monitoring_available()) {
-		SaveCombo(ui->monitoringDevice, "Audio", "MonitoringDeviceName");
-		SaveComboData(ui->monitoringDevice, "Audio", "MonitoringDeviceId");
+		if (asioBackend) {
+			config_set_string(main->Config(), "Audio", kAsioMonitoringOutputNameKey,
+					  QT_TO_UTF8(ui->monitoringDevice->currentText()));
+			config_set_string(main->Config(), "Audio", kAsioMonitoringOutputIdKey,
+					  QT_TO_UTF8(ui->monitoringDevice->currentData().toString()));
+		} else {
+			SaveCombo(ui->monitoringDevice, "Audio", "MonitoringDeviceName");
+			SaveComboData(ui->monitoringDevice, "Audio", "MonitoringDeviceId");
+		}
 	}
 
 #ifdef _WIN32
@@ -3216,13 +3580,16 @@ void OBSBasicSettings::SaveAdvancedSettings()
 	if (obs_audio_monitoring_available()) {
 		QString newDevice = ui->monitoringDevice->currentData().toString();
 
-		if (lastMonitoringDevice != newDevice) {
+		if (!asioBackend && lastMonitoringDevice != newDevice) {
 			obs_set_audio_monitoring_device(QT_TO_UTF8(ui->monitoringDevice->currentText()),
-							QT_TO_UTF8(newDevice));
+						QT_TO_UTF8(newDevice));
 
 			blog(LOG_INFO, "Audio monitoring device:\n\tname: %s\n\tid: %s",
 			     QT_TO_UTF8(ui->monitoringDevice->currentText()), QT_TO_UTF8(newDevice));
 		}
+
+#ifdef _WIN32
+#endif
 	}
 }
 
@@ -3470,6 +3837,9 @@ void OBSBasicSettings::SaveAudioSettings()
 {
 	QString sampleRateStr = ui->sampleRate->currentText();
 	int channelSetupIdx = ui->channelSetup->currentIndex();
+	bool asioBackend = IsAsioBackendText(ui->audioBackend->currentText());
+
+	SaveAudioBackendSettings();
 
 	const char *channelSetup;
 	switch (channelSetupIdx) {
@@ -3565,12 +3935,29 @@ void OBSBasicSettings::SaveAudioSettings()
 				       QT_TO_UTF8(GetComboData(combo)), Str(name), index);
 	};
 
-	UpdateAudioDevice(false, ui->desktopAudioDevice1, "Basic.DesktopDevice1", 1);
-	UpdateAudioDevice(false, ui->desktopAudioDevice2, "Basic.DesktopDevice2", 2);
-	UpdateAudioDevice(true, ui->auxAudioDevice1, "Basic.AuxDevice1", 3);
-	UpdateAudioDevice(true, ui->auxAudioDevice2, "Basic.AuxDevice2", 4);
-	UpdateAudioDevice(true, ui->auxAudioDevice3, "Basic.AuxDevice3", 5);
-	UpdateAudioDevice(true, ui->auxAudioDevice4, "Basic.AuxDevice4", 6);
+	if (asioBackend) {
+		QComboBox *combos[] = {
+			ui->desktopAudioDevice1,
+			ui->desktopAudioDevice2,
+			ui->auxAudioDevice1,
+			ui->auxAudioDevice2,
+			ui->auxAudioDevice3,
+			ui->auxAudioDevice4,
+		};
+
+		for (size_t i = 0; i < 6; ++i) {
+			config_set_string(main->Config(), "Audio", kAsioRouteIdKeys[i], QT_TO_UTF8(GetComboData(combos[i])));
+			config_set_string(main->Config(), "Audio", kAsioRouteNameKeys[i], QT_TO_UTF8(combos[i]->currentText()));
+		}
+	} else {
+		UpdateAudioDevice(false, ui->desktopAudioDevice1, "Basic.DesktopDevice1", 1);
+		UpdateAudioDevice(false, ui->desktopAudioDevice2, "Basic.DesktopDevice2", 2);
+		UpdateAudioDevice(true, ui->auxAudioDevice1, "Basic.AuxDevice1", 3);
+		UpdateAudioDevice(true, ui->auxAudioDevice2, "Basic.AuxDevice2", 4);
+		UpdateAudioDevice(true, ui->auxAudioDevice3, "Basic.AuxDevice3", 5);
+		UpdateAudioDevice(true, ui->auxAudioDevice4, "Basic.AuxDevice4", 6);
+	}
+
 	main->SaveProject();
 }
 
@@ -3670,14 +4057,43 @@ void OBSBasicSettings::SaveSettings()
 	}
 
 	bool langChanged = (ui->language->currentIndex() != prevLangIndex);
+	bool asioRoutingRestart = false;
+#ifdef _WIN32
+	if (IsAsioBackendText(ui->audioBackend->currentText())) {
+		QWidget *asioRouteWidgets[] = {
+			ui->desktopAudioDevice1,
+			ui->desktopAudioDevice2,
+			ui->auxAudioDevice1,
+			ui->auxAudioDevice2,
+			ui->auxAudioDevice3,
+			ui->auxAudioDevice4,
+		};
+
+		for (QWidget *widget : asioRouteWidgets) {
+			if (WidgetChanged(widget)) {
+				asioRoutingRestart = true;
+				break;
+			}
+		}
+
+		if (!asioRoutingRestart && obs_audio_monitoring_available() && ui->monitoringDevice)
+			asioRoutingRestart = WidgetChanged(ui->monitoringDevice);
+	}
+#endif
 	bool audioRestart =
-		(ui->channelSetup->currentIndex() != channelIndex || ui->sampleRate->currentIndex() != sampleRateIndex);
+		(ui->channelSetup->currentIndex() != channelIndex || ui->sampleRate->currentIndex() != sampleRateIndex ||
+		 ui->lowLatencyBuffering->isChecked() != llBufferingEnabled ||
+		 ui->audioBackend->currentText() != initialAudioBackend ||
+		 ui->bufferSize->currentText() != initialAudioBufferSize ||
+		 ui->asioDeviceComboBox->currentText() != initialAsioDevice || asioRoutingRestart);
 	bool browserHWAccelChanged = (ui->browserHWAccel && ui->browserHWAccel->isChecked() != prevBrowserAccel);
 
 	if (langChanged || audioRestart || browserHWAccelChanged)
 		restart = true;
 	else
 		restart = false;
+
+	UpdateAudioRestartBaseline();
 }
 
 bool OBSBasicSettings::QueryChanges()
@@ -4140,9 +4556,13 @@ void OBSBasicSettings::AudioChangedRestart()
 		int currentChannelIndex = ui->channelSetup->currentIndex();
 		int currentSampleRateIndex = ui->sampleRate->currentIndex();
 		bool currentLLAudioBufVal = ui->lowLatencyBuffering->isChecked();
+		bool currentBackendChanged = ui->audioBackend->currentText() != initialAudioBackend;
+		bool currentBufferSizeChanged = ui->bufferSize->currentText() != initialAudioBufferSize;
+		bool currentAsioDeviceChanged = ui->asioDeviceComboBox->currentText() != initialAsioDevice;
 
 		if (currentChannelIndex != channelIndex || currentSampleRateIndex != sampleRateIndex ||
-		    currentLLAudioBufVal != llBufferingEnabled) {
+		    currentLLAudioBufVal != llBufferingEnabled || currentBackendChanged ||
+		    currentBufferSizeChanged || currentAsioDeviceChanged) {
 			ui->audioMsg->setText(QTStr("Basic.Settings.ProgramRestart"));
 			ui->audioMsg->setVisible(true);
 		} else {
@@ -4780,6 +5200,7 @@ void OBSBasicSettings::FillSimpleRecordingValues()
 void OBSBasicSettings::FillAudioMonitoringDevices()
 {
 	QComboBox *cb = ui->monitoringDevice;
+	cb->clear();
 
 	auto enum_devices = [](void *param, const char *name, const char *id) {
 		QComboBox *cb = (QComboBox *)param;

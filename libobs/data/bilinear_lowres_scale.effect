@@ -8,6 +8,7 @@
 uniform float4x4 ViewProj;
 uniform texture2d image;
 uniform float multiplier;
+uniform float opacity = 1.0;
 
 sampler_state textureSampler {
 	Filter    = Linear;
@@ -57,14 +58,14 @@ float4 DrawLowresBilinear(VertData f_in)
 
 float4 PSDrawLowresBilinearRGBA(VertData f_in) : TARGET
 {
-	return DrawLowresBilinear(f_in);
+	return DrawLowresBilinear(f_in) * opacity;
 }
 
 float4 PSDrawLowresBilinearRGBAMultiply(VertData f_in) : TARGET
 {
 	float4 rgba = DrawLowresBilinear(f_in);
 	rgba.rgb *= multiplier;
-	return rgba;
+	return rgba * opacity;
 }
 
 float4 PSDrawLowresBilinearRGBATonemap(VertData f_in) : TARGET
@@ -73,7 +74,7 @@ float4 PSDrawLowresBilinearRGBATonemap(VertData f_in) : TARGET
 	rgba.rgb = rec709_to_rec2020(rgba.rgb);
 	rgba.rgb = reinhard(rgba.rgb);
 	rgba.rgb = rec2020_to_rec709(rgba.rgb);
-	return rgba;
+	return rgba * opacity;
 }
 
 float4 PSDrawLowresBilinearRGBAMultiplyTonemap(VertData f_in) : TARGET
@@ -83,7 +84,7 @@ float4 PSDrawLowresBilinearRGBAMultiplyTonemap(VertData f_in) : TARGET
 	rgba.rgb = rec709_to_rec2020(rgba.rgb);
 	rgba.rgb = reinhard(rgba.rgb);
 	rgba.rgb = rec2020_to_rec709(rgba.rgb);
-	return rgba;
+	return rgba * opacity;
 }
 
 technique Draw

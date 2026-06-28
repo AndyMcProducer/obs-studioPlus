@@ -20,6 +20,8 @@ private:
 	bool prevPaused = false;
 	bool countDownTimer = false;
 	bool isSlideshow = false;
+	bool showDedicatedPlayButton = false;
+	bool playPauseButtonAfterStop = false;
 
 	QString FormatSeconds(int totalSeconds);
 	void StartMediaTimer();
@@ -40,6 +42,7 @@ private:
 private slots:
 	void on_playPauseButton_clicked();
 	void on_stopButton_clicked();
+	void on_playButton_clicked();
 	void on_nextButton_clicked();
 	void on_previousButton_clicked();
 	void on_durationLabel_clicked();
@@ -75,5 +78,7 @@ public:
 
 	OBSSource GetSource();
 	void SetSource(OBSSource newSource);
+	void SetDedicatedPlayButtonVisible(bool visible);
+	void SetPlayPauseButtonAfterStop(bool afterStop);
 	bool MediaPaused();
 };

@@ -41,6 +41,9 @@
 #include <settings/OBSBasicSettings.hpp>
 #include <utility/QuickTransition.hpp>
 #include <utility/SceneRenameDelegate.hpp>
+#include <components/MediaPlaylistWidget.hpp>
+#include "../../libobs/media-io/asio/obs-asio.h"
+#include "../../libobs/media-io/asio/obs-asio-bridge.h"
 #if defined(_WIN32) || defined(WHATSNEW_ENABLED)
 #include <utility/WhatsNewInfoThread.hpp>
 #endif
@@ -353,6 +356,15 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 	resizeDocks({ui->scenesDock, ui->sourcesDock}, {sideDockWidth, sideDockWidth}, Qt::Horizontal);
 	addDockWidget(Qt::BottomDockWidgetArea, controlsDock);
 
+	mediaPlaylistWidget = new MediaPlaylistWidget(this);
+	mediaPlaylistDock = new OBSDock(this);
+	mediaPlaylistDock->setObjectName(QStringLiteral("mediaPlaylistDock"));
+	mediaPlaylistDock->setWindowTitle(QTStr("MediaPlaylistDock.Title"));
+	mediaPlaylistDock->setWidget(mediaPlaylistWidget);
+	addDockWidget(Qt::RightDockWidgetArea, mediaPlaylistDock);
+	mediaPlaylistDock->toggleViewAction()->setVisible(false);
+	mediaPlaylistDock->setVisible(false);
+
 	startingDockLayout = saveState();
 
 	statsDock = new OBSDock();
@@ -566,6 +578,14 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 
 	ui->previewDisabledWidget->setContextMenuPolicy(Qt::CustomContextMenu);
 	connect(ui->enablePreviewButton, &QPushButton::clicked, this, &OBSBasic::TogglePreview);
+
+	/* Canvas toggle buttons */
+	connect(ui->canvasHorizButton, &QPushButton::clicked, this, [this]() {
+		SwitchEditorCanvas(EditorCanvasType::Horizontal);
+	});
+	connect(ui->canvasVertButton, &QPushButton::clicked, this, [this]() {
+		SwitchEditorCanvas(EditorCanvasType::Vertical);
+	});
 
 	connect(ui->scenes, &SceneTree::scenesReordered, ui->scenes,
 		[]() { OBSProjector::UpdateMultiviewProjectors(); });
@@ -915,10 +935,13 @@ void OBSBasic::InitOBSCallbacks()
 {
 	ProfileScope("OBSBasic::InitOBSCallbacks");
 
-	signalHandlers.reserve(signalHandlers.size() + 6);
+	signalHandlers.reserve(signalHandlers.size() + 9);
 	signalHandlers.emplace_back(obs_get_signal_handler(), "source_create", OBSBasic::SourceCreated, this);
 	signalHandlers.emplace_back(obs_get_signal_handler(), "source_remove", OBSBasic::SourceRemoved, this);
 	signalHandlers.emplace_back(obs_get_signal_handler(), "source_rename", OBSBasic::SourceRenamed, this);
+	signalHandlers.emplace_back(obs_get_signal_handler(), "source_update", OBSBasic::SourceChanged, this);
+	signalHandlers.emplace_back(obs_get_signal_handler(), "source_load", OBSBasic::SourceChanged, this);
+	signalHandlers.emplace_back(obs_get_signal_handler(), "source_destroy", OBSBasic::SourceChanged, this);
 	signalHandlers.emplace_back(
 		obs_get_signal_handler(), "source_filter_add",
 		[](void *data, calldata_t *) {
@@ -1156,8 +1179,9 @@ void OBSBasic::OBSInit()
 #ifdef _WIN32
 	SetWin32DropStyle(this);
 
-	if (!hideWindowOnStart)
+	if (!hideWindowOnStart) {
 		show();
+	}
 #endif
 
 	bool alwaysOnTop = config_get_bool(App()->GetUserConfig(), "BasicWindow", "AlwaysOnTop");
@@ -1213,6 +1237,12 @@ void OBSBasic::OBSInit()
 	}
 #endif
 
+	mediaPlaylistMenu = new QMenu(QTStr("MediaPlaylistDock.Menu"), this);
+	ui->menuDocks->insertMenu(ui->scenesDock->toggleViewAction(), mediaPlaylistMenu);
+	connect(mediaPlaylistMenu, &QMenu::aboutToShow, this, &OBSBasic::RefreshMediaPlaylistDocks);
+	LoadMediaPlaylistDocks();
+	RefreshMediaPlaylistDocks();
+
 #ifdef YOUTUBE_ENABLED
 	/* setup YouTube app dock */
 	if (YouTubeAppDock::IsYTServiceSelected())
@@ -1228,6 +1258,9 @@ void OBSBasic::OBSInit()
 		if (!restoreState(dockState))
 			on_resetDocks_triggered(true);
 	}
+
+	if (mediaPlaylistDock)
+		mediaPlaylistDock->hide();
 
 	bool pre23Defaults = config_get_bool(App()->GetUserConfig(), "General", "Pre23Defaults");
 	if (pre23Defaults) {
@@ -1599,6 +1632,8 @@ int OBSBasic::ResetVideo()
 	}
 
 	if (ret == OBS_VIDEO_SUCCESS) {
+		SyncVerticalCanvasVideoInfo();
+
 		ResizePreview(ovi.base_width, ovi.base_height);
 		if (program)
 			ResizeProgram(ovi.base_width, ovi.base_height);
@@ -1637,6 +1672,15 @@ int OBSBasic::ResetVideo()
 bool OBSBasic::ResetAudio()
 {
 	ProfileScope("OBSBasic::ResetAudio");
+	static constexpr const char *kAsioRouteIdKeys[] = {
+		"ASIODesktopAudioDevice1Id",
+		"ASIODesktopAudioDevice2Id",
+		"ASIOAuxAudioDevice1Id",
+		"ASIOAuxAudioDevice2Id",
+		"ASIOAuxAudioDevice3Id",
+		"ASIOAuxAudioDevice4Id",
+	};
+	static constexpr const char *kAsioMonitoringOutputIdKey = "ASIOMonitoringOutputId";
 
 	struct obs_audio_info2 ai = {};
 	ai.samples_per_sec = config_get_uint(activeConfiguration, "Audio", "SampleRate");
@@ -1657,6 +1701,66 @@ bool OBSBasic::ResetAudio()
 		ai.speakers = SPEAKERS_7POINT1;
 	else
 		ai.speakers = SPEAKERS_STEREO;
+
+	// --- Audio Backend/Buffer Size wiring ---
+	const char *backendStr = config_get_string(activeConfiguration, "Audio", "Backend");
+	const char *bufferSizeStr = config_get_string(activeConfiguration, "Audio", "BufferSize");
+	const char *asioDeviceStr = config_get_string(activeConfiguration, "Audio", "ASIODevice");
+
+	obs_asio_set_selected_device(asioDeviceStr && *asioDeviceStr ? asioDeviceStr : nullptr);
+
+	auto parseAsioPair = [this](const char *key) {
+		obs_asio_channel_pair pair = {-1, -1};
+		const char *value = config_get_string(activeConfiguration, "Audio", key);
+		if (!value || !*value || strcmp(value, "disabled") == 0)
+			return pair;
+
+		char *end = nullptr;
+		long left = strtol(value, &end, 10);
+		if (end == value)
+			return pair;
+
+		pair.left = (int)left;
+		pair.right = pair.left;
+		if (end && *end == ',') {
+			char *rightStart = end + 1;
+			char *rightEnd = nullptr;
+			long right = strtol(rightStart, &rightEnd, 10);
+			if (rightEnd != rightStart)
+				pair.right = (int)right;
+		}
+
+		return pair;
+	};
+
+	obs_asio_channel_pair asioPairs[6];
+	for (size_t i = 0; i < 6; ++i)
+		asioPairs[i] = {-1, -1};
+	obs_asio_channel_pair monitorPair = {-1, -1};
+
+	// Map backend string to enum (must match obs_audio_backend in obs.h)
+	if (backendStr && strcmp(backendStr, "WASAPI") == 0)
+		ai.backend = OBS_AUDIO_BACKEND_WASAPI;
+	else if (backendStr && strcmp(backendStr, "ASIO") == 0)
+		ai.backend = OBS_AUDIO_BACKEND_ASIO;
+	else if (backendStr && (strstr(backendStr, "Exclusive") || strcmp(backendStr, "WASAPI Exclusive") == 0))
+		ai.backend = OBS_AUDIO_BACKEND_WASAPI_EXCLUSIVE;
+	else
+		ai.backend = OBS_AUDIO_BACKEND_WASAPI; // Default
+
+	if (bufferSizeStr && strlen(bufferSizeStr) > 0)
+		ai.buffer_size = atoi(bufferSizeStr);
+	else
+		ai.buffer_size = 0;
+
+	if (ai.backend == OBS_AUDIO_BACKEND_ASIO) {
+		for (size_t i = 0; i < 6; ++i)
+			asioPairs[i] = parseAsioPair(kAsioRouteIdKeys[i]);
+		monitorPair = parseAsioPair(kAsioMonitoringOutputIdKey);
+	}
+
+	obs_asio_bridge_set_input_pairs(asioPairs, 6);
+	obs_asio_bridge_set_monitor_pair(monitorPair.left, monitorPair.right);
 
 	bool lowLatencyAudioBuffering = config_get_bool(App()->GetUserConfig(), "Audio", "LowLatencyAudioBuffering");
 	if (lowLatencyAudioBuffering) {
@@ -1851,6 +1955,7 @@ void OBSBasic::saveAll()
 
 	Auth::Save();
 	SaveProjectNow();
+	SaveMediaPlaylistDocks();
 
 	config_set_string(App()->GetUserConfig(), "BasicWindow", "DockState", saveState().toBase64().constData());
 

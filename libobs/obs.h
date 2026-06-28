@@ -221,9 +221,19 @@ struct obs_video_info {
 /**
  * Audio initialization structure
  */
+enum obs_audio_backend {
+	OBS_AUDIO_BACKEND_WDM = 0,
+	/* WASAPI name kept for frontend code compatibility */
+	OBS_AUDIO_BACKEND_WASAPI = 0,
+	OBS_AUDIO_BACKEND_ASIO = 1,
+	OBS_AUDIO_BACKEND_WASAPI_EXCLUSIVE = 2
+};
+
 struct obs_audio_info {
 	uint32_t samples_per_sec;
 	enum speaker_layout speakers;
+	enum obs_audio_backend backend; // audio backend selection
+	uint32_t buffer_size;           // buffer size for exclusive mode (0 = default)
 };
 
 struct obs_audio_info2 {
@@ -232,6 +242,10 @@ struct obs_audio_info2 {
 
 	uint32_t max_buffering_ms;
 	bool fixed_buffering;
+
+	/* Audio backend selection and exclusive-mode buffer size */
+	enum obs_audio_backend backend;
+	uint32_t buffer_size;
 };
 
 /**

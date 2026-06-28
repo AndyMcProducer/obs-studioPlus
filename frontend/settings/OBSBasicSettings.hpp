@@ -38,7 +38,7 @@ struct OBSTheme;
 std::string DeserializeConfigText(const char *value);
 
 class OBSBasicSettings : public QDialog {
-	Q_OBJECT
+    Q_OBJECT
 	Q_PROPERTY(QIcon generalIcon READ GetGeneralIcon WRITE SetGeneralIcon DESIGNABLE true)
 	Q_PROPERTY(QIcon appearanceIcon READ GetAppearanceIcon WRITE SetAppearanceIcon DESIGNABLE true)
 	Q_PROPERTY(QIcon streamIcon READ GetStreamIcon WRITE SetStreamIcon DESIGNABLE true)
@@ -74,6 +74,9 @@ private:
 	int sampleRateIndex = 0;
 	int channelIndex = 0;
 	bool llBufferingEnabled = false;
+	QString initialAudioBackend;
+	QString initialAudioBufferSize;
+	QString initialAsioDevice;
 	bool hotkeysLoaded = false;
 
 	int lastSimpleRecQualityIdx = 0;
@@ -194,6 +197,16 @@ private:
 	void LoadAdvancedSettings();
 	void LoadSettings(bool changedOnly);
 
+	// Audio backend/buffer size logic
+	void OnAudioBackendChanged(int idx);
+	void LoadAudioBackendSettings();
+	void SaveAudioBackendSettings();
+	void RestoreMonitoringDeviceSelection();
+	void RefreshAudioBackendDeviceLists(bool asioBackend);
+	void UpdateAudioRestartBaseline();
+	void LoadAsioAudioDevices();
+	void LoadAsioChannelPairs(QComboBox *widget, bool input, const char *idKey, const char *nameKey);
+
 	OBSPropertiesView *CreateEncoderPropertyView(const char *encoder, const char *path, bool changed = false);
 
 	/* general */
@@ -243,6 +256,8 @@ private slots:
 	void on_useAuth_toggled();
 	void on_server_currentIndexChanged(int index);
 
+	void on_asioControlPanelButton_clicked();
+
 	void on_hotkeyFilterReset_clicked();
 	void on_hotkeyFilterSearch_textChanged(const QString text);
 	void on_hotkeyFilterInput_KeyChanged(obs_key_combination_t combo);
@@ -261,6 +276,7 @@ private:
 	/* audio */
 	void LoadListValues(QComboBox *widget, obs_property_t *prop, int index);
 	void LoadAudioDevices();
+	void PopulateAsioDevices();
 	void LoadAudioSources();
 
 	/* video */

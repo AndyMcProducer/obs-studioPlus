@@ -107,6 +107,17 @@ void OBSBasic::AddScene(OBSSource source)
 	const char *name = obs_source_get_name(source);
 	obs_scene_t *scene = obs_scene_from_source(source);
 
+	/* Only add to the list widget if the scene belongs to the currently displayed canvas */
+	{
+		OBSCanvasAutoRelease sceneCvs = obs_source_get_canvas(source);
+		const bool sceneIsVertical = sceneCvs && !verticalCanvasUuid.empty() &&
+					     strcmp(obs_canvas_get_uuid(sceneCvs), verticalCanvasUuid.c_str()) == 0;
+		const bool viewingVertical = (activeEditorCanvas == EditorCanvasType::Vertical);
+		if (sceneIsVertical != viewingVertical)
+			goto skip_list_insert;
+	}
+
+	{
 	QListWidgetItem *item = new QListWidgetItem(QT_UTF8(name));
 	SetOBSRef(item, OBSScene(scene));
 	ui->scenes->insertItem(ui->scenes->currentRow() + 1, item);
@@ -162,6 +173,10 @@ void OBSBasic::AddScene(OBSSource source)
 	}
 
 	OnEvent(OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED);
+	} // canvas check scope
+
+skip_list_insert:
+	;
 }
 
 void OBSBasic::RemoveScene(OBSSource source)
@@ -495,19 +510,31 @@ void OBSBasic::SceneItemAdded(void *data, calldata_t *params)
 void OBSBasic::on_scenes_currentItemChanged(QListWidgetItem *current, QListWidgetItem *)
 {
 	OBSSource source;
-
 	bool forceSceneChange = false;
+	OBSScene prevScene = currentScene.load();
 
 	if (current) {
 		OBSScene scene = GetOBSRef<OBSScene>(current);
 		source = obs_scene_get_source(scene);
-
-		bool oldSceneIsRemoved = obs_source_removed(obs_scene_get_source(currentScene));
-		forceSceneChange = oldSceneIsRemoved;
-
+		if (prevScene)
+			forceSceneChange = obs_source_removed(obs_scene_get_source(prevScene));
 		currentScene = scene;
 	} else {
 		currentScene = NULL;
+	}
+
+	if (activeEditorCanvas == EditorCanvasType::Vertical) {
+		/* Vertical mode: track selection locally; don't push to main transition stack */
+		if (source) {
+			verticalCurrentSceneUuid = obs_source_get_uuid(source);
+			RefreshSources(obs_scene_from_source(source));
+		} else {
+			verticalCurrentSceneUuid.clear();
+			ui->sources->Clear();
+		}
+		OnEvent(OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED);
+		UpdateContextBar();
+		return;
 	}
 
 	SetCurrentScene(source, forceSceneChange);
@@ -684,16 +711,34 @@ void OBSBasic::on_actionAddScene_triggered()
 			}
 		};
 
-		auto redo_fn = [this](const std::string &data) {
-			OBSSceneAutoRelease scene = obs_scene_create(data.c_str());
-			obs_source_t *source = obs_scene_get_source(scene);
-			SetCurrentScene(source, true);
-		};
-		undo_s.add_action(QTStr("Undo.Add").arg(QString(name.c_str())), undo_fn, redo_fn, name, name);
+		if (activeEditorCanvas == EditorCanvasType::Vertical) {
+			OBSCanvas vc = GetVerticalCanvas();
+			if (!vc)
+				return;
+			auto redo_fn = [this](const std::string &data) {
+				OBSCanvas vc2 = GetVerticalCanvas();
+				if (!vc2) return;
+				obs_canvas_scene_create(vc2, data.c_str());
+			};
+			undo_s.add_action(QTStr("Undo.Add").arg(QString(name.c_str())), undo_fn, redo_fn, name, name);
+			OBSSceneAutoRelease scene = obs_canvas_scene_create(vc, name.c_str());
+			if (scene) {
+				obs_source_t *scene_source = obs_scene_get_source(scene);
+				verticalCurrentSceneUuid = obs_source_get_uuid(scene_source);
+			}
+			RefreshSceneListForCanvas();
+		} else {
+			auto redo_fn = [this](const std::string &data) {
+				OBSSceneAutoRelease scene = obs_scene_create(data.c_str());
+				obs_source_t *source = obs_scene_get_source(scene);
+				SetCurrentScene(source, true);
+			};
+			undo_s.add_action(QTStr("Undo.Add").arg(QString(name.c_str())), undo_fn, redo_fn, name, name);
 
-		OBSSceneAutoRelease scene = obs_scene_create(name.c_str());
-		obs_source_t *scene_source = obs_scene_get_source(scene);
-		SetCurrentScene(scene_source);
+			OBSSceneAutoRelease scene = obs_scene_create(name.c_str());
+			obs_source_t *scene_source = obs_scene_get_source(scene);
+			SetCurrentScene(scene_source);
+		}
 	}
 }
 

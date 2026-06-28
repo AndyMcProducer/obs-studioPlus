@@ -1,0 +1,129 @@
+uniform float4x4 ViewProj;
+uniform texture2d image;
+uniform texture2d mask;
+
+uniform float4 background_color;
+uniform float2 pixel_size;
+uniform float threshold;
+uniform float softness;
+uniform float blur_radius;
+
+sampler_state textureSampler {
+	Filter    = Linear;
+	AddressU  = Clamp;
+	AddressV  = Clamp;
+};
+
+struct VertData {
+	float4 pos : POSITION;
+	float2 uv  : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+	VertData vert_out;
+	vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	vert_out.uv  = v_in.uv;
+	return vert_out;
+}
+
+float4 SampleStraight(float2 uv)
+{
+	float4 rgba = image.Sample(textureSampler, uv);
+	rgba.rgb *= (rgba.a > 0.0) ? (1.0 / rgba.a) : 0.0;
+	return rgba;
+}
+
+float Matte(float2 uv)
+{
+	float raw = mask.Sample(textureSampler, uv).r;
+	float edge = max(softness, 0.0001);
+	return smoothstep(threshold - edge, threshold + edge, raw);
+}
+
+float3 Blur(float2 uv)
+{
+	float2 radius = pixel_size * blur_radius;
+	float3 sum = SampleStraight(uv).rgb * 0.20;
+	sum += SampleStraight(uv + float2(radius.x, 0.0)).rgb * 0.10;
+	sum += SampleStraight(uv - float2(radius.x, 0.0)).rgb * 0.10;
+	sum += SampleStraight(uv + float2(0.0, radius.y)).rgb * 0.10;
+	sum += SampleStraight(uv - float2(0.0, radius.y)).rgb * 0.10;
+	sum += SampleStraight(uv + float2(radius.x, radius.y)).rgb * 0.075;
+	sum += SampleStraight(uv + float2(-radius.x, radius.y)).rgb * 0.075;
+	sum += SampleStraight(uv + float2(radius.x, -radius.y)).rgb * 0.075;
+	sum += SampleStraight(uv - float2(radius.x, radius.y)).rgb * 0.075;
+	sum += SampleStraight(uv + float2(radius.x * 2.0, 0.0)).rgb * 0.05;
+	sum += SampleStraight(uv - float2(radius.x * 2.0, 0.0)).rgb * 0.05;
+	sum += SampleStraight(uv + float2(0.0, radius.y * 2.0)).rgb * 0.05;
+	sum += SampleStraight(uv - float2(0.0, radius.y * 2.0)).rgb * 0.05;
+	return sum;
+}
+
+float4 PSTransparent(VertData v_in) : TARGET
+{
+	float4 rgba = SampleStraight(v_in.uv);
+	float matte = Matte(v_in.uv);
+
+	rgba.a *= matte;
+	rgba.rgb *= rgba.a;
+	return rgba;
+}
+
+float4 PSGreenScreen(VertData v_in) : TARGET
+{
+	float4 rgba = SampleStraight(v_in.uv);
+	float foreground = Matte(v_in.uv) * rgba.a;
+	float3 rgb = lerp(background_color.rgb, rgba.rgb, foreground);
+	return float4(rgb, 1.0);
+}
+
+float4 PSBlur(VertData v_in) : TARGET
+{
+	float4 rgba = SampleStraight(v_in.uv);
+	float foreground = Matte(v_in.uv) * rgba.a;
+	float3 rgb = lerp(Blur(v_in.uv), rgba.rgb, foreground);
+	return float4(rgb, 1.0);
+}
+
+float4 PSMaskPreview(VertData v_in) : TARGET
+{
+	float matte = mask.Sample(textureSampler, v_in.uv).r;
+	return float4(matte, matte, matte, 1.0);
+}
+
+technique Transparent
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSTransparent(v_in);
+	}
+}
+
+technique GreenScreen
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSGreenScreen(v_in);
+	}
+}
+
+technique Blur
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSBlur(v_in);
+	}
+}
+
+technique MaskPreview
+{
+	pass
+	{
+		vertex_shader = VSDefault(v_in);
+		pixel_shader  = PSMaskPreview(v_in);
+	}
+}

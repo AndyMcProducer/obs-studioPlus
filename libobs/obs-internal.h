@@ -451,6 +451,8 @@ struct obs_core_audio {
 	int total_buffering_ticks;
 	int max_buffering_ticks;
 	bool fixed_buffer;
+	enum obs_audio_backend backend;
+	uint32_t buffer_size;
 
 	pthread_mutex_t monitoring_mutex;
 	DARRAY(struct audio_monitor *) monitors;

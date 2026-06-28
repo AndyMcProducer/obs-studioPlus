@@ -148,6 +148,7 @@ static enum speaker_layout convert_speaker_layout(DWORD layout, WORD channels)
 static bool audio_monitor_init_wasapi(struct audio_monitor *monitor)
 {
 	bool success = false;
+	const bool exclusive = obs->audio.backend == OBS_AUDIO_BACKEND_WASAPI_EXCLUSIVE;
 	IMMDeviceEnumerator *immde = NULL;
 	WAVEFORMATEX *wfex = NULL;
 	UINT32 frames;
@@ -194,7 +195,27 @@ static bool audio_monitor_init_wasapi(struct audio_monitor *monitor)
 		goto fail;
 	}
 
-	hr = monitor->client->lpVtbl->Initialize(monitor->client, AUDCLNT_SHAREMODE_SHARED, 0, 10000000, 0, wfex, NULL);
+	if (exclusive) {
+		REFERENCE_TIME default_period = 0;
+		REFERENCE_TIME min_period = 0;
+		REFERENCE_TIME buffer_duration = 0;
+
+		hr = monitor->client->lpVtbl->GetDevicePeriod(monitor->client, &default_period, &min_period);
+		if (FAILED(hr)) {
+			warn("%s: Failed to get exclusive device period: %08lX", __FUNCTION__, hr);
+			goto fail;
+		}
+
+		buffer_duration = obs->audio.buffer_size
+					 ? util_mul_div64(obs->audio.buffer_size, 10000000ULL, wfex->nSamplesPerSec)
+					 : default_period;
+
+		hr = monitor->client->lpVtbl->Initialize(monitor->client, AUDCLNT_SHAREMODE_EXCLUSIVE, 0,
+							 buffer_duration, buffer_duration, wfex, NULL);
+	} else {
+		hr = monitor->client->lpVtbl->Initialize(monitor->client, AUDCLNT_SHAREMODE_SHARED, 0, 10000000, 0,
+						 wfex, NULL);
+	}
 	if (FAILED(hr)) {
 		warn("%s: Failed to initialize: %08lX", __FUNCTION__, hr);
 		goto fail;

@@ -158,7 +158,7 @@ void OBSBasic::AddDropSource(const char *data, DropType image)
 	case DropType_Media:
 		obs_data_set_string(settings, "local_file", data);
 		name = QUrl::fromLocalFile(QString(data)).fileName();
-		type = "ffmpeg_source";
+		type = "ffmpeg_media_source";
 		break;
 	case DropType_Html:
 		obs_data_set_bool(settings, "is_local_file", true);

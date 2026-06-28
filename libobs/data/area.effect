@@ -5,6 +5,7 @@ uniform float2 base_dimension;
 uniform float2 base_dimension_i;
 uniform texture2d image;
 uniform float multiplier;
+uniform float opacity = 1.0;
 
 sampler_state textureSampler {
 	Filter    = Linear;
@@ -88,14 +89,14 @@ float4 DrawArea(FragData frag_in)
 
 float4 PSDrawAreaRGBA(FragData frag_in) : TARGET
 {
-	return DrawArea(frag_in);
+	return DrawArea(frag_in) * opacity;
 }
 
 float4 PSDrawAreaRGBAMultiply(FragData frag_in) : TARGET
 {
 	float4 rgba = DrawArea(frag_in);
 	rgba.rgb *= multiplier;
-	return rgba;
+	return rgba * opacity;
 }
 
 float4 PSDrawAreaRGBATonemap(FragData frag_in) : TARGET
@@ -104,7 +105,7 @@ float4 PSDrawAreaRGBATonemap(FragData frag_in) : TARGET
 	rgba.rgb = rec709_to_rec2020(rgba.rgb);
 	rgba.rgb = reinhard(rgba.rgb);
 	rgba.rgb = rec2020_to_rec709(rgba.rgb);
-	return rgba;
+	return rgba * opacity;
 }
 
 float4 PSDrawAreaRGBAMultiplyTonemap(FragData frag_in) : TARGET
@@ -114,7 +115,7 @@ float4 PSDrawAreaRGBAMultiplyTonemap(FragData frag_in) : TARGET
 	rgba.rgb = rec709_to_rec2020(rgba.rgb);
 	rgba.rgb = reinhard(rgba.rgb);
 	rgba.rgb = rec2020_to_rec709(rgba.rgb);
-	return rgba;
+	return rgba * opacity;
 }
 
 float4 DrawAreaUpscale(FragData frag_in)
@@ -148,14 +149,14 @@ float4 DrawAreaUpscale(FragData frag_in)
 
 float4 PSDrawAreaRGBAUpscale(FragData frag_in) : TARGET
 {
-	return DrawAreaUpscale(frag_in);
+	return DrawAreaUpscale(frag_in) * opacity;
 }
 
 float4 PSDrawAreaRGBAUpscaleMultiply(FragData frag_in) : TARGET
 {
 	float4 rgba = DrawAreaUpscale(frag_in);
 	rgba.rgb *= multiplier;
-	return rgba;
+	return rgba * opacity;
 }
 
 float4 PSDrawAreaRGBAUpscaleTonemap(FragData frag_in) : TARGET
@@ -164,7 +165,7 @@ float4 PSDrawAreaRGBAUpscaleTonemap(FragData frag_in) : TARGET
 	rgba.rgb = rec709_to_rec2020(rgba.rgb);
 	rgba.rgb = reinhard(rgba.rgb);
 	rgba.rgb = rec2020_to_rec709(rgba.rgb);
-	return rgba;
+	return rgba * opacity;
 }
 
 float4 PSDrawAreaRGBAUpscaleMultiplyTonemap(FragData frag_in) : TARGET
@@ -174,7 +175,7 @@ float4 PSDrawAreaRGBAUpscaleMultiplyTonemap(FragData frag_in) : TARGET
 	rgba.rgb = rec709_to_rec2020(rgba.rgb);
 	rgba.rgb = reinhard(rgba.rgb);
 	rgba.rgb = rec2020_to_rec709(rgba.rgb);
-	return rgba;
+	return rgba * opacity;
 }
 
 technique Draw

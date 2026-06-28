@@ -41,7 +41,7 @@ function try_play()
 		if source ~= nil then
 			local settings = obs.obs_data_create()
 			source_id = obs.obs_source_get_id(source)
-			if source_id == "ffmpeg_source" then
+			if source_id == "ffmpeg_source" or source_id == "ffmpeg_media_source" then
 				obs.obs_data_set_string(settings, "local_file", path)
 				obs.obs_data_set_bool(settings, "is_local_file", true)
 
@@ -122,7 +122,7 @@ function script_properties()
 	if sources ~= nil then
 		for _, source in ipairs(sources) do
 			source_id = obs.obs_source_get_id(source)
-			if source_id == "ffmpeg_source" then
+			if source_id == "ffmpeg_source" or source_id == "ffmpeg_media_source" then
 				local name = obs.obs_source_get_name(source)
 				obs.obs_property_list_add_string(p, name, name)
 			elseif source_id == "vlc_source" then

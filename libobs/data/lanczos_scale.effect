@@ -12,6 +12,7 @@ uniform float2 base_dimension;
 uniform float2 base_dimension_i;
 uniform float undistort_factor = 1.0;
 uniform float multiplier;
+uniform float opacity = 1.0;
 
 sampler_state textureSampler
 {
@@ -190,14 +191,14 @@ float4 DrawLanczos(FragData f_in, bool undistort)
 
 float4 PSDrawLanczosRGBA(FragData f_in, bool undistort) : TARGET
 {
-	return DrawLanczos(f_in, undistort);
+	return DrawLanczos(f_in, undistort) * opacity;
 }
 
 float4 PSDrawLanczosRGBAMultiply(FragData f_in, bool undistort) : TARGET
 {
 	float4 rgba = DrawLanczos(f_in, undistort);
 	rgba.rgb *= multiplier;
-	return rgba;
+	return rgba * opacity;
 }
 
 float4 PSDrawLanczosRGBATonemap(FragData f_in, bool undistort) : TARGET
@@ -206,7 +207,7 @@ float4 PSDrawLanczosRGBATonemap(FragData f_in, bool undistort) : TARGET
 	rgba.rgb = rec709_to_rec2020(rgba.rgb);
 	rgba.rgb = reinhard(rgba.rgb);
 	rgba.rgb = rec2020_to_rec709(rgba.rgb);
-	return rgba;
+	return rgba * opacity;
 }
 
 float4 PSDrawLanczosRGBAMultiplyTonemap(FragData f_in, bool undistort) : TARGET
@@ -216,7 +217,7 @@ float4 PSDrawLanczosRGBAMultiplyTonemap(FragData f_in, bool undistort) : TARGET
 	rgba.rgb = rec709_to_rec2020(rgba.rgb);
 	rgba.rgb = reinhard(rgba.rgb);
 	rgba.rgb = rec2020_to_rec709(rgba.rgb);
-	return rgba;
+	return rgba * opacity;
 }
 
 technique Draw

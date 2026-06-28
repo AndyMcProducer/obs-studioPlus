@@ -125,7 +125,7 @@ static void parse_media_types(QDomNamedNodeMap &attr, Json::object &source, Json
 			if (prot == "smlndi") {
 				source["id"] = "ndi_source";
 			} else {
-				source["id"] = "ffmpeg_source";
+				source["id"] = "ffmpeg_media_source";
 				int info = url.indexOf("\\");
 				QString input;
 
@@ -139,7 +139,7 @@ static void parse_media_types(QDomNamedNodeMap &attr, Json::object &source, Json
 				settings["is_local_file"] = false;
 			}
 		} else {
-			source["id"] = "ffmpeg_source";
+			source["id"] = "ffmpeg_media_source";
 			settings["local_file"] = url.replace("\\", "/").toStdString();
 			settings["is_local_file"] = true;
 		}

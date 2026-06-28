@@ -718,6 +718,92 @@ static inline bool crop_enabled(const struct obs_sceneitem_crop *crop)
 	return crop->left || crop->right || crop->top || crop->bottom;
 }
 
+static inline bool source_is_ffmpeg(const struct obs_source *source)
+{
+	return source && strcmp(source->info.id, "ffmpeg_source") == 0;
+}
+
+enum ffmpeg_transition_mode {
+	FFMPEG_TRANSITION_CUT,
+	FFMPEG_TRANSITION_FADE,
+	FFMPEG_TRANSITION_CROSSFADE,
+};
+
+static inline float source_get_ffmpeg_setting_percent(const struct obs_source *source, const char *name,
+					      int64_t default_value)
+{
+	int64_t value = default_value;
+
+	if (source && source->private_settings)
+		value = obs_data_get_int(source->private_settings, name);
+
+	if (value < 0)
+		value = 0;
+	else if (value > 100)
+		value = 100;
+
+	return (float)value * 0.01f;
+}
+
+static inline uint32_t source_get_ffmpeg_transition_ms(const struct obs_source *source)
+{
+	int64_t value = 0;
+
+	if (source && source->private_settings)
+		value = obs_data_get_int(source->private_settings, "ffmpeg_transition_ms");
+
+	return value > 0 ? (uint32_t)value : 0;
+}
+
+static inline enum ffmpeg_transition_mode source_get_ffmpeg_transition_mode(const struct obs_source *source)
+{
+	int64_t value = FFMPEG_TRANSITION_CROSSFADE;
+
+	if (source && source->private_settings)
+		value = obs_data_get_int(source->private_settings, "ffmpeg_transition_mode");
+
+	return value < FFMPEG_TRANSITION_CUT || value > FFMPEG_TRANSITION_CROSSFADE
+		       ? FFMPEG_TRANSITION_CROSSFADE
+		       : (enum ffmpeg_transition_mode)value;
+}
+
+static inline uint64_t source_get_ffmpeg_transition_start_ns(const struct obs_source *source)
+{
+	int64_t value = 0;
+
+	if (source && source->private_settings)
+		value = obs_data_get_int(source->private_settings, "ffmpeg_transition_start_ns");
+
+	return value > 0 ? (uint64_t)value : 0;
+}
+
+static inline uint64_t source_get_ffmpeg_transition_serial(const struct obs_source *source)
+{
+	int64_t value = 0;
+
+	if (source && source->private_settings)
+		value = obs_data_get_int(source->private_settings, "ffmpeg_transition_serial");
+
+	return value > 0 ? (uint64_t)value : 0;
+}
+
+static inline bool source_has_ffmpeg_blur_fill(const struct obs_source *source)
+{
+	return source_is_ffmpeg(source) && source->private_settings &&
+	       obs_data_get_bool(source->private_settings, "ffmpeg_blur_fill");
+}
+
+static inline bool item_has_ffmpeg_blur_fill(const struct obs_scene_item *item)
+{
+	return item->bounds_type == OBS_BOUNDS_SCALE_INNER && source_has_ffmpeg_blur_fill(item->source);
+}
+
+static inline bool item_has_ffmpeg_transition(const struct obs_scene_item *item)
+{
+	return source_is_ffmpeg(item->source) && source_get_ffmpeg_transition_mode(item->source) != FFMPEG_TRANSITION_CUT &&
+	       source_get_ffmpeg_transition_ms(item->source) > 0;
+}
+
 static inline bool scale_filter_enabled(const struct obs_scene_item *item)
 {
 	return item->scale_filter != OBS_SCALE_DISABLE;
@@ -737,7 +823,182 @@ static inline bool item_texture_enabled(const struct obs_scene_item *item)
 {
 	return crop_enabled(&item->crop) || crop_enabled(&item->bounds_crop) || scale_filter_enabled(item) ||
 	       (item->blend_method == OBS_BLEND_METHOD_SRGB_OFF) || !default_blending_enabled(item) ||
-	       (item_is_scene(item) && !item->is_group);
+	       (item_is_scene(item) && !item->is_group) || item_has_ffmpeg_blur_fill(item) ||
+	       item_has_ffmpeg_transition(item);
+}
+
+static void draw_scene_item_texture(gs_texture_t *tex, gs_effect_t *effect, const char *tech_name,
+				    gs_eparam_t *multiplier_param, float multiplier,
+				    gs_eparam_t *opacity_param, float opacity)
+{
+	float pass_multiplier = opacity_param ? multiplier : multiplier * opacity;
+
+	if (multiplier_param)
+		gs_effect_set_float(multiplier_param, pass_multiplier);
+	if (opacity_param)
+		gs_effect_set_float(opacity_param, opacity);
+
+	while (gs_effect_loop(effect, tech_name))
+		obs_source_draw(tex, 0, 0, 0, 0, 0);
+
+	if (opacity_param)
+		gs_effect_set_float(opacity_param, 1.0f);
+	if (multiplier_param)
+		gs_effect_set_float(multiplier_param, multiplier);
+}
+
+static bool snapshot_ffmpeg_transition_texture(struct obs_scene_item *item, enum gs_color_space source_space)
+{
+	gs_texture_t *tex;
+	gs_effect_t *effect;
+	gs_eparam_t *multiplier_param;
+	gs_eparam_t *opacity_param;
+	struct vec4 clear_color;
+	const enum gs_color_format format = gs_get_format_from_space(source_space);
+	uint32_t cx;
+	uint32_t cy;
+
+	if (!item->item_render)
+		return false;
+
+	tex = gs_texrender_get_texture(item->item_render);
+	if (!tex)
+		return false;
+
+	if (item->ffmpeg_transition_render && gs_texrender_get_format(item->ffmpeg_transition_render) != format) {
+		gs_texrender_destroy(item->ffmpeg_transition_render);
+		item->ffmpeg_transition_render = NULL;
+	}
+
+	if (!item->ffmpeg_transition_render)
+		item->ffmpeg_transition_render = gs_texrender_create(format, GS_ZS_NONE);
+
+	if (!item->ffmpeg_transition_render)
+		return false;
+
+	cx = gs_texture_get_width(tex);
+	cy = gs_texture_get_height(tex);
+	if (!cx || !cy)
+		return false;
+
+	if (!gs_texrender_begin_with_color_space(item->ffmpeg_transition_render, cx, cy, source_space))
+		return false;
+
+	vec4_zero(&clear_color);
+	gs_clear(GS_CLEAR_COLOR, &clear_color, 0.0f, 0);
+	gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
+
+	effect = obs->video.default_effect;
+	multiplier_param = gs_effect_get_param_by_name(effect, "multiplier");
+	opacity_param = gs_effect_get_param_by_name(effect, "opacity");
+
+	gs_blend_state_push();
+	gs_enable_blending(false);
+	draw_scene_item_texture(tex, effect, "Draw", multiplier_param, 1.0f, opacity_param, 1.0f);
+	gs_blend_state_pop();
+
+	gs_texrender_end(item->ffmpeg_transition_render);
+	item->ffmpeg_transition_space = source_space;
+	return true;
+}
+
+static void update_ffmpeg_transition_snapshot(struct obs_scene_item *item, enum gs_color_space source_space)
+{
+	uint64_t serial;
+	const enum ffmpeg_transition_mode mode = source_get_ffmpeg_transition_mode(item->source);
+
+	if (!item_has_ffmpeg_transition(item) || mode != FFMPEG_TRANSITION_CROSSFADE) {
+		item->ffmpeg_transition_serial = source_get_ffmpeg_transition_serial(item->source);
+		item->ffmpeg_transition_start_ns = 0;
+		return;
+	}
+
+	serial = source_get_ffmpeg_transition_serial(item->source);
+	if (!serial || serial == item->ffmpeg_transition_serial)
+		return;
+
+	if (snapshot_ffmpeg_transition_texture(item, source_space)) {
+		item->ffmpeg_transition_start_ns = os_gettime_ns();
+	} else {
+		item->ffmpeg_transition_start_ns = 0;
+	}
+
+	item->ffmpeg_transition_serial = serial;
+}
+
+static void render_item_ffmpeg_blur_fill(const struct obs_scene_item *item, gs_texture_t *tex, gs_effect_t *effect,
+				 const char *tech_name, gs_eparam_t *multiplier_param,
+				 gs_eparam_t *opacity_param, float multiplier, uint32_t cx, uint32_t cy)
+{
+	static const struct {
+		float x;
+		float y;
+		float weight;
+	} blur_samples[] = {
+		{0.0f, 0.0f, 0.10f},
+		{-1.0f, 0.0f, 0.06f},
+		{1.0f, 0.0f, 0.06f},
+		{0.0f, -1.0f, 0.06f},
+		{0.0f, 1.0f, 0.06f},
+		{-1.0f, -1.0f, 0.04f},
+		{-1.0f, 1.0f, 0.04f},
+		{1.0f, -1.0f, 0.04f},
+		{1.0f, 1.0f, 0.04f},
+	};
+	const float output_scale_x = fabsf(item->output_scale.x);
+	const float output_scale_y = fabsf(item->output_scale.y);
+	const float screen_width = (float)cx * output_scale_x;
+	const float screen_height = (float)cy * output_scale_y;
+	const float target_width = fabsf(item->box_scale.x);
+	const float target_height = fabsf(item->box_scale.y);
+	const float blur_strength = source_get_ffmpeg_setting_percent(item->source, "ffmpeg_blur_fill_strength", 35);
+	const float blur_opacity = source_get_ffmpeg_setting_percent(item->source, "ffmpeg_blur_fill_opacity", 100);
+	float fill_scale;
+	float screen_offset;
+	float offset_x;
+	float offset_y;
+	float center_x;
+	float center_y;
+
+	if (!item_has_ffmpeg_blur_fill(item))
+		return;
+	if (blur_opacity <= EPSILON)
+		return;
+
+	if (screen_width <= EPSILON || screen_height <= EPSILON || target_width <= EPSILON || target_height <= EPSILON)
+		return;
+
+	fill_scale = fmaxf(target_width / screen_width, target_height / screen_height);
+	if (fill_scale <= 1.01f)
+		return;
+	screen_offset = fmaxf(target_width, target_height) * (0.004f + blur_strength * 0.024f);
+	offset_x = screen_offset / output_scale_x;
+	offset_y = screen_offset / output_scale_y;
+	center_x = (float)cx * 0.5f;
+	center_y = (float)cy * 0.5f;
+
+	gs_blend_state_push();
+	gs_blend_function_separate(GS_BLEND_ONE, GS_BLEND_ONE, GS_BLEND_ONE, GS_BLEND_ONE);
+
+	for (size_t i = 0; i < OBS_COUNTOF(blur_samples); i++) {
+		gs_matrix_push();
+		gs_matrix_translate3f(center_x, center_y, 0.0f);
+		gs_matrix_scale3f(fill_scale, fill_scale, 1.0f);
+		gs_matrix_translate3f(-center_x + blur_samples[i].x * offset_x,
+					     -center_y + blur_samples[i].y * offset_y, 0.0f);
+
+		draw_scene_item_texture(tex, effect, tech_name, multiplier_param,
+					multiplier * blur_samples[i].weight, opacity_param, blur_opacity);
+
+		gs_matrix_pop();
+	}
+
+	gs_blend_state_pop();
+
+	if (multiplier_param)
+		gs_effect_set_float(multiplier_param, multiplier);
+	if (opacity_param)
+		gs_effect_set_float(opacity_param, 1.0f);
 }
 
 static void render_item_texture(struct obs_scene_item *item, enum gs_color_space current_space,
@@ -861,8 +1122,12 @@ static void render_item_texture(struct obs_scene_item *item, enum gs_color_space
 	}
 
 	gs_eparam_t *const multiplier_param = gs_effect_get_param_by_name(effect, "multiplier");
+	gs_eparam_t *const opacity_param = gs_effect_get_param_by_name(effect, "opacity");
 	if (multiplier_param)
 		gs_effect_set_float(multiplier_param, multiplier);
+
+	render_item_ffmpeg_blur_fill(item, tex, effect, tech_name, multiplier_param, opacity_param, multiplier, cx,
+				      cy);
 
 	gs_blend_state_push();
 
@@ -872,8 +1137,61 @@ static void render_item_texture(struct obs_scene_item *item, enum gs_color_space
 				   obs_blend_mode_params[item->blend_type].dst_alpha);
 	gs_blend_op(obs_blend_mode_params[item->blend_type].op);
 
-	while (gs_effect_loop(effect, tech_name))
-		obs_source_draw(tex, 0, 0, 0, 0, 0);
+	if (source_get_ffmpeg_transition_mode(item->source) == FFMPEG_TRANSITION_FADE) {
+		const uint32_t transition_ms = source_get_ffmpeg_transition_ms(item->source);
+		const uint64_t transition_start_ns = source_get_ffmpeg_transition_start_ns(item->source);
+
+		if (transition_ms && transition_start_ns) {
+			const uint64_t duration_ns = (uint64_t)transition_ms * 1000000ULL;
+			const uint64_t now = os_gettime_ns();
+			const uint64_t elapsed = now > transition_start_ns ? now - transition_start_ns : duration_ns;
+
+			if (elapsed < duration_ns) {
+				const float progress = (float)elapsed / (float)duration_ns;
+				const float opacity = progress < 0.5f ? 1.0f - progress * 2.0f : (progress - 0.5f) * 2.0f;
+
+				draw_scene_item_texture(tex, effect, tech_name, multiplier_param, multiplier, opacity_param,
+						opacity);
+			} else {
+				draw_scene_item_texture(tex, effect, tech_name, multiplier_param, multiplier, opacity_param,
+						1.0f);
+			}
+		} else {
+			draw_scene_item_texture(tex, effect, tech_name, multiplier_param, multiplier, opacity_param, 1.0f);
+		}
+	} else if (item->ffmpeg_transition_start_ns && item->ffmpeg_transition_space == source_space &&
+	    item->ffmpeg_transition_render) {
+		const uint32_t transition_ms = source_get_ffmpeg_transition_ms(item->source);
+		gs_texture_t *transition_tex = gs_texrender_get_texture(item->ffmpeg_transition_render);
+
+		if (!transition_ms || !transition_tex) {
+			item->ffmpeg_transition_start_ns = 0;
+		} else {
+			const uint64_t duration_ns = (uint64_t)transition_ms * 1000000ULL;
+			const uint64_t now = os_gettime_ns();
+			const uint64_t elapsed = now > item->ffmpeg_transition_start_ns
+						 ? now - item->ffmpeg_transition_start_ns
+						 : duration_ns;
+
+			if (elapsed < duration_ns) {
+				const float progress = (float)elapsed / (float)duration_ns;
+
+				draw_scene_item_texture(transition_tex, effect, tech_name, multiplier_param, multiplier,
+						opacity_param, 1.0f - progress);
+				draw_scene_item_texture(tex, effect, tech_name, multiplier_param, multiplier,
+						opacity_param, progress);
+			} else {
+				item->ffmpeg_transition_start_ns = 0;
+				draw_scene_item_texture(tex, effect, tech_name, multiplier_param, multiplier,
+						opacity_param, 1.0f);
+			}
+		}
+	} else if (item->ffmpeg_transition_start_ns && item->ffmpeg_transition_space != source_space) {
+		item->ffmpeg_transition_start_ns = 0;
+		draw_scene_item_texture(tex, effect, tech_name, multiplier_param, multiplier, opacity_param, 1.0f);
+	} else {
+		draw_scene_item_texture(tex, effect, tech_name, multiplier_param, multiplier, opacity_param, 1.0f);
+	}
 
 	gs_blend_state_pop();
 
@@ -914,7 +1232,22 @@ static inline void render_item(struct obs_scene_item *item)
 		item->item_render = gs_texrender_create(format, GS_ZS_NONE);
 	}
 
+	if (item->ffmpeg_transition_render &&
+	    source_get_ffmpeg_transition_mode(item->source) != FFMPEG_TRANSITION_CROSSFADE) {
+		gs_texrender_destroy(item->ffmpeg_transition_render);
+		item->ffmpeg_transition_render = NULL;
+		item->ffmpeg_transition_serial = source_get_ffmpeg_transition_serial(item->source);
+		item->ffmpeg_transition_start_ns = 0;
+	} else if (item->ffmpeg_transition_render && !item_has_ffmpeg_transition(item)) {
+		gs_texrender_destroy(item->ffmpeg_transition_render);
+		item->ffmpeg_transition_render = NULL;
+		item->ffmpeg_transition_serial = source_get_ffmpeg_transition_serial(item->source);
+		item->ffmpeg_transition_start_ns = 0;
+	}
+
 	if (item->item_render) {
+		update_ffmpeg_transition_snapshot(item, source_space);
+
 		uint32_t width = obs_source_get_width(item->source);
 		uint32_t height = obs_source_get_height(item->source);
 
@@ -2370,9 +2703,10 @@ obs_sceneitem_t *obs_scene_add(obs_scene_t *scene, obs_source_t *source)
 static void obs_sceneitem_destroy(obs_sceneitem_t *item)
 {
 	if (item) {
-		if (item->item_render) {
+		if (item->item_render || item->ffmpeg_transition_render) {
 			obs_enter_graphics();
 			gs_texrender_destroy(item->item_render);
+			gs_texrender_destroy(item->ffmpeg_transition_render);
 			obs_leave_graphics();
 		}
 		obs_data_release(item->private_settings);

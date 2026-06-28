@@ -800,6 +800,12 @@ constexpr std::string_view AUX_AUDIO_1{"AuxAudioDevice1"};
 constexpr std::string_view AUX_AUDIO_2{"AuxAudioDevice2"};
 constexpr std::string_view AUX_AUDIO_3{"AuxAudioDevice3"};
 constexpr std::string_view AUX_AUDIO_4{"AuxAudioDevice4"};
+
+bool IsAsioAudioBackend(config_t *config)
+{
+	const char *backend = config ? config_get_string(config, "Audio", "Backend") : nullptr;
+	return backend && strcmp(backend, "ASIO") == 0;
+}
 } // namespace
 
 void OBSBasic::Save(SceneCollection &collection)
@@ -813,21 +819,24 @@ void OBSBasic::Save(SceneCollection &collection)
 	// Global audio sources
 	vector<OBSSource> audioSources;
 	audioSources.reserve(6);
+	const bool asioBackend = IsAsioAudioBackend(activeConfiguration);
 
-	auto SaveAudioDevice = [&](const std::string_view &key, int channel) {
+	auto SaveAudioDevice = [&](const std::string_view &key, int channel, size_t index) {
 		if (OBSSourceAutoRelease source = obs_get_output_source(channel)) {
 			audioSources.emplace_back(source.Get());
 			OBSDataAutoRelease data = obs_save_source(source);
 			obs_data_set_obj(saveData, key.data(), data);
+		} else if (asioBackend && deferredGlobalAudioSources[index]) {
+			obs_data_set_obj(saveData, key.data(), deferredGlobalAudioSources[index]);
 		}
 	};
 
-	SaveAudioDevice(DESKTOP_AUDIO_1, 1);
-	SaveAudioDevice(DESKTOP_AUDIO_2, 2);
-	SaveAudioDevice(AUX_AUDIO_1, 3);
-	SaveAudioDevice(AUX_AUDIO_2, 4);
-	SaveAudioDevice(AUX_AUDIO_3, 5);
-	SaveAudioDevice(AUX_AUDIO_4, 6);
+	SaveAudioDevice(DESKTOP_AUDIO_1, 1, 0);
+	SaveAudioDevice(DESKTOP_AUDIO_2, 2, 1);
+	SaveAudioDevice(AUX_AUDIO_1, 3, 2);
+	SaveAudioDevice(AUX_AUDIO_2, 4, 3);
+	SaveAudioDevice(AUX_AUDIO_3, 5, 4);
+	SaveAudioDevice(AUX_AUDIO_4, 6, 5);
 
 	// Non-global sources
 
@@ -999,13 +1008,20 @@ void OBSBasic::DeferSaveEnd()
 
 static void LogFilter(obs_source_t *, obs_source_t *filter, void *v_val);
 
-static void LoadAudioDevice(const char *name, int channel, obs_data_t *parent)
+static void LoadAudioDevice(const char *name, int channel, obs_data_t *parent, OBSDataAutoRelease &savedData,
+			    bool skipLoad)
 {
-	OBSDataAutoRelease data = obs_data_get_obj(parent, name);
-	if (!data)
+	savedData = obs_data_get_obj(parent, name);
+	if (!savedData)
 		return;
 
-	OBSSourceAutoRelease source = obs_load_source(data);
+	if (skipLoad) {
+		blog(LOG_INFO, "[Skipping global audio device load]: '%s' due to ASIO backend", name);
+		obs_set_output_source(channel, nullptr);
+		return;
+	}
+
+	OBSSourceAutoRelease source = obs_load_source(savedData);
 	if (!source)
 		return;
 
@@ -1201,8 +1217,9 @@ void OBSBasic::LoadData(obs_data_t *data, SceneCollection &collection)
 	QApplication::sendPostedEvents(nullptr);
 
 	OBSDataAutoRelease modulesObj = obs_data_get_obj(data, "modules");
-	if (api)
+	if (api) {
 		api->on_preload(modulesObj);
+	}
 
 	/* Keep a reference to "modules" data so plugins that are not loaded do
 	 * not have their collection specific data lost. */
@@ -1238,16 +1255,17 @@ void OBSBasic::LoadData(obs_data_t *data, SceneCollection &collection)
 	OBSSourceAutoRelease curScene;
 	OBSSourceAutoRelease curProgramScene;
 	obs_source_t *curTransition;
+	const bool asioBackend = IsAsioAudioBackend(activeConfiguration);
 
 	if (!name || !*name)
 		name = curSceneCollection;
 
-	LoadAudioDevice(DESKTOP_AUDIO_1.data(), 1, data);
-	LoadAudioDevice(DESKTOP_AUDIO_2.data(), 2, data);
-	LoadAudioDevice(AUX_AUDIO_1.data(), 3, data);
-	LoadAudioDevice(AUX_AUDIO_2.data(), 4, data);
-	LoadAudioDevice(AUX_AUDIO_3.data(), 5, data);
-	LoadAudioDevice(AUX_AUDIO_4.data(), 6, data);
+	LoadAudioDevice(DESKTOP_AUDIO_1.data(), 1, data, deferredGlobalAudioSources[0], asioBackend);
+	LoadAudioDevice(DESKTOP_AUDIO_2.data(), 2, data, deferredGlobalAudioSources[1], asioBackend);
+	LoadAudioDevice(AUX_AUDIO_1.data(), 3, data, deferredGlobalAudioSources[2], asioBackend);
+	LoadAudioDevice(AUX_AUDIO_2.data(), 4, data, deferredGlobalAudioSources[3], asioBackend);
+	LoadAudioDevice(AUX_AUDIO_3.data(), 5, data, deferredGlobalAudioSources[4], asioBackend);
+	LoadAudioDevice(AUX_AUDIO_4.data(), 6, data, deferredGlobalAudioSources[5], asioBackend);
 
 	if (collection_canvases)
 		canvases = OBS::Canvas::LoadCanvases(collection_canvases);

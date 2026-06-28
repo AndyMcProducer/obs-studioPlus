@@ -15,6 +15,8 @@ MODULE_EXPORT const char *obs_module_description(void)
 void RegisterWASAPIInput();
 void RegisterWASAPIDeviceOutput();
 void RegisterWASAPIProcessOutput();
+void RegisterASIOInput();
+void RegisterASIOOutput();
 
 WASAPINotify *notify = nullptr;
 
@@ -50,6 +52,8 @@ bool obs_module_load(void)
 
 	RegisterWASAPIInput();
 	RegisterWASAPIDeviceOutput();
+	RegisterASIOInput();
+	RegisterASIOOutput();
 	if (process_filter_supported)
 		RegisterWASAPIProcessOutput();
 
