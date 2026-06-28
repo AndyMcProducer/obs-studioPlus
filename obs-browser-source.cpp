@@ -21,9 +21,13 @@
 #include "browser-scheme.hpp"
 #include "wide-string.hpp"
 #include <nlohmann/json.hpp>
+#include <util/platform.h>
 #include <util/threading.h>
 #include <QApplication>
 #include <util/dstr.h>
+#include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <functional>
 #include <thread>
 #include <mutex>
@@ -47,6 +51,132 @@ extern bool QueueCEFTask(std::function<void()> task);
 
 static mutex browser_list_mutex;
 static BrowserSource *first_browser = nullptr;
+static constexpr const char *S_PLAYLIST = "playlist";
+static constexpr const char *BROWSER_SOURCE_ID = "browser_source";
+static constexpr const char *BROWSER_PLAYLIST_SOURCE_ID = "browser_playlist_source";
+
+static BrowserTransitionMode ClampBrowserTransitionMode(int mode)
+{
+	return mode < BROWSER_TRANSITION_CUT || mode > BROWSER_TRANSITION_CROSSFADE ? BROWSER_TRANSITION_CROSSFADE
+										    : (BrowserTransitionMode)mode;
+}
+
+static float ClampFloat(float value, float min, float max)
+{
+	return value < min ? min : value > max ? max : value;
+}
+
+static bool BrowserSourceIsPlaylistSourceId(const char *id)
+{
+	return id && strcmp(id, BROWSER_PLAYLIST_SOURCE_ID) == 0;
+}
+
+static std::string LowerString(std::string str)
+{
+	std::transform(str.begin(), str.end(), str.begin(), [](unsigned char ch) { return (char)std::tolower(ch); });
+	return str;
+}
+
+static bool EndsWith(const std::string &value, const std::string &suffix)
+{
+	return value.size() >= suffix.size() && value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+static bool PathIsUrl(const std::string &path)
+{
+	return path.find("://") != std::string::npos;
+}
+
+static std::string RewriteYouTubeUrl(std::string input)
+{
+	size_t schemeEnd = input.find("://");
+	size_t hostStart = schemeEnd == std::string::npos ? 0 : schemeEnd + 3;
+	size_t hostEnd = input.find_first_of("/?#", hostStart);
+	std::string host = input.substr(hostStart, hostEnd == std::string::npos ? std::string::npos : hostEnd - hostStart);
+	std::string hostLower = LowerString(host);
+
+	if (hostLower == "youtu.be" || EndsWith(hostLower, ".youtu.be")) {
+		size_t pathStart = hostEnd == std::string::npos ? std::string::npos : hostEnd + 1;
+		size_t idEnd = pathStart == std::string::npos ? std::string::npos : input.find_first_of("?#/", pathStart);
+		std::string videoId =
+			pathStart == std::string::npos ? std::string() : input.substr(pathStart, idEnd - pathStart);
+		std::string query;
+
+		if (idEnd != std::string::npos && input[idEnd] == '?')
+			query = input.substr(idEnd + 1);
+		else if (idEnd != std::string::npos) {
+			size_t queryStart = input.find('?', idEnd);
+			if (queryStart != std::string::npos)
+				query = input.substr(queryStart + 1);
+		}
+
+		if (videoId.empty())
+			return input;
+
+		std::string rewritten = "https://yout-ube.com/watch?v=" + videoId;
+		if (!query.empty())
+			rewritten += "&" + query;
+		return rewritten;
+	}
+
+	if (hostLower == "youtube.com" || EndsWith(hostLower, ".youtube.com")) {
+		size_t youtubePos = hostLower.rfind("youtube.com");
+		std::string newHost = host;
+		newHost.replace(youtubePos, strlen("youtube.com"), "yout-ube.com");
+		input.replace(hostStart, host.size(), newHost);
+	}
+
+	return input;
+}
+
+static std::string NormalizeBrowserUrl(std::string input, bool isLocal, bool rewriteYouTube)
+{
+	if (isLocal && !input.empty()) {
+		input = CefURIEncode(input, false);
+
+#ifdef _WIN32
+		size_t slash = input.find("%2F");
+		size_t colon = input.find("%3A");
+
+		if (slash != std::string::npos && colon != std::string::npos && colon < slash)
+			input.replace(colon, 3, ":");
+#endif
+
+		while (input.find("%5C") != std::string::npos)
+			input.replace(input.find("%5C"), 3, "/");
+
+		while (input.find("%2F") != std::string::npos)
+			input.replace(input.find("%2F"), 3, "/");
+
+		// Local files are routed through our custom scheme handler to give them access to other local files.
+		return "http://absolute/" + input;
+	}
+
+	return rewriteYouTube ? RewriteYouTubeUrl(input) : input;
+}
+
+static std::vector<std::string> LoadPlaylist(obs_data_t *settings)
+{
+	std::vector<std::string> playlist;
+	obs_data_array_t *array = obs_data_get_array(settings, S_PLAYLIST);
+
+	if (!array)
+		return playlist;
+
+	const size_t count = obs_data_array_count(array);
+	for (size_t i = 0; i < count; i++) {
+		obs_data_t *item = obs_data_array_item(array, i);
+		const char *value = obs_data_get_string(item, "value");
+
+		if (value && *value)
+			playlist.emplace_back(value);
+
+		obs_data_release(item);
+	}
+
+	obs_data_array_release(array);
+	return playlist;
+}
 
 static void SendBrowserVisibility(CefRefPtr<CefBrowser> browser, bool isVisible)
 {
@@ -68,9 +198,13 @@ static void SendBrowserVisibility(CefRefPtr<CefBrowser> browser, bool isVisible)
 }
 
 void DispatchJSEvent(std::string eventName, std::string jsonString, BrowserSource *browser = nullptr);
+static void SignalPlaylistUpdated(BrowserSource *bs);
+static void SignalPlaylistSelectionChanged(BrowserSource *bs);
 
 BrowserSource::BrowserSource(obs_data_t *, obs_source_t *source_) : source(source_)
 {
+	const char *id = obs_source_get_unversioned_id(source);
+	playlist_source = BrowserSourceIsPlaylistSourceId(id);
 
 	/* Register Refresh hotkey */
 	auto refreshFunction = [](void *data, obs_hotkey_id, obs_hotkey_t *, bool pressed) {
@@ -96,6 +230,42 @@ BrowserSource::BrowserSource(obs_data_t *, obs_source_t *source_) : source(sourc
 	proc_handler_t *ph = obs_source_get_proc_handler(source);
 	proc_handler_add(ph, "void javascript_event(string eventName, string jsonString)", jsEventFunction,
 			 (void *)this);
+
+	if (playlist_source) {
+		auto getPlaylistCount = [](void *data, calldata_t *cd) {
+			BrowserSource *bs = (BrowserSource *)data;
+			calldata_set_int(cd, "count", bs->GetPlaylistCount());
+		};
+
+		auto getPlaylistIndex = [](void *data, calldata_t *cd) {
+			BrowserSource *bs = (BrowserSource *)data;
+			calldata_set_int(cd, "index", bs->GetPlaylistIndex());
+		};
+
+		auto getPlaylistItem = [](void *data, calldata_t *cd) {
+			BrowserSource *bs = (BrowserSource *)data;
+			int64_t index = calldata_int(cd, "index");
+			std::string path = index >= 0 ? bs->GetPlaylistItem((size_t)index) : std::string();
+			calldata_set_string(cd, "path", path.c_str());
+		};
+
+		auto setPlaylistIndex = [](void *data, calldata_t *cd) {
+			BrowserSource *bs = (BrowserSource *)data;
+			int64_t index = calldata_int(cd, "index");
+
+			if (index >= 0)
+				bs->SetPlaylistIndex((size_t)index);
+		};
+
+		proc_handler_add(ph, "void get_playlist_count(out int count)", getPlaylistCount, this);
+		proc_handler_add(ph, "void get_playlist_index(out int index)", getPlaylistIndex, this);
+		proc_handler_add(ph, "void get_playlist_item(in int index, out string path)", getPlaylistItem, this);
+		proc_handler_add(ph, "void set_playlist_index(in int index)", setPlaylistIndex, this);
+
+		signal_handler_t *sh = obs_source_get_signal_handler(source);
+		signal_handler_add(sh, "void playlist_updated(int count)");
+		signal_handler_add(sh, "void playlist_selection_changed(int index, string path)");
+	}
 
 	/* defer update */
 	obs_source_update(source, nullptr);
@@ -135,6 +305,7 @@ void BrowserSource::Destroy()
 {
 	destroying = true;
 	DestroyTextures();
+	DestroyTransitionTexture();
 
 	lock_guard<mutex> lock(browser_list_mutex);
 	if (next)
@@ -195,7 +366,8 @@ bool BrowserSource::CreateBrowser()
 #endif
 
 		CefRefPtr<BrowserClient> browserClient =
-			new BrowserClient(this, hwaccel && tex_sharing_avail, reroute_audio, webpage_control_level);
+			new BrowserClient(this, hwaccel && tex_sharing_avail, reroute_audio, allow_mic, mic_device,
+					  webpage_control_level);
 
 		CefWindowInfo windowInfo;
 		windowInfo.bounds.width = width;
@@ -423,7 +595,237 @@ void BrowserSource::SetActive(bool active)
 
 void BrowserSource::Refresh()
 {
+	media_state = OBS_MEDIA_STATE_PLAYING;
 	ExecuteOnBrowser([](CefRefPtr<CefBrowser> cefBrowser) { cefBrowser->ReloadIgnoreCache(); }, true);
+}
+
+void BrowserSource::PlayPause(bool pause)
+{
+	media_state = pause ? OBS_MEDIA_STATE_PAUSED : OBS_MEDIA_STATE_PLAYING;
+	ExecuteOnBrowser(
+		[=](CefRefPtr<CefBrowser> cefBrowser) {
+			const char *script = pause
+						     ? "document.querySelectorAll('video,audio').forEach((media) => media.pause());"
+						     : "document.querySelectorAll('video,audio').forEach((media) => {"
+						       "const promise = media.play();"
+						       "if (promise && promise.catch) promise.catch(() => {});"
+						       "});";
+			CefRefPtr<CefFrame> frame = cefBrowser->GetMainFrame();
+			frame->ExecuteJavaScript(script, frame->GetURL(), 0);
+		},
+		true);
+}
+
+void BrowserSource::Stop()
+{
+	media_state = OBS_MEDIA_STATE_STOPPED;
+	ExecuteOnBrowser(
+		[](CefRefPtr<CefBrowser> cefBrowser) {
+			CefRefPtr<CefFrame> frame = cefBrowser->GetMainFrame();
+			frame->ExecuteJavaScript("document.querySelectorAll('video,audio').forEach((media) => media.pause());",
+						 frame->GetURL(), 0);
+			cefBrowser->StopLoad();
+		},
+		true);
+}
+
+void BrowserSource::PlaylistNext()
+{
+	if (playlist.empty())
+		return;
+
+	if (playlist_index + 1 < playlist.size()) {
+		SetPlaylistIndex(playlist_index + 1);
+	} else if (playlist_looping) {
+		SetPlaylistIndex(0);
+	}
+}
+
+void BrowserSource::PlaylistPrevious()
+{
+	if (playlist.empty())
+		return;
+
+	if (playlist_index > 0) {
+		SetPlaylistIndex(playlist_index - 1);
+	} else if (playlist_looping) {
+		SetPlaylistIndex(playlist.size() - 1);
+	}
+}
+
+uint64_t BrowserSource::TransitionDurationNs() const
+{
+	return transition_ms > 0 ? (uint64_t)transition_ms * 1000000ULL : 0;
+}
+
+bool BrowserSource::IsFadeTransition() const
+{
+	return transition_mode == BROWSER_TRANSITION_FADE && transition_ms > 0;
+}
+
+bool BrowserSource::IsCrossfadeTransition() const
+{
+	return transition_mode == BROWSER_TRANSITION_CROSSFADE && transition_ms > 0;
+}
+
+void BrowserSource::ResetTransition()
+{
+	transition_active = false;
+	transition_midpoint_pending = false;
+	transition_start_ns = 0;
+	DestroyTransitionTexture();
+}
+
+bool BrowserSource::CaptureTransitionTexture()
+{
+	DestroyTransitionTexture();
+
+	if (!texture)
+		return false;
+
+	obs_enter_graphics();
+
+	const uint32_t cx = gs_texture_get_width(texture);
+	const uint32_t cy = gs_texture_get_height(texture);
+	const gs_color_format format = gs_texture_get_color_format(texture);
+
+	if (!cx || !cy || format == GS_UNKNOWN) {
+		obs_leave_graphics();
+		return false;
+	}
+
+	transition_texture = gs_texture_create(cx, cy, format, 1, nullptr, 0);
+	if (transition_texture)
+		gs_copy_texture(transition_texture, texture);
+
+	obs_leave_graphics();
+	return transition_texture != nullptr;
+}
+
+void BrowserSource::StartPlaylistIndex(size_t index)
+{
+	if (!playlist_source || index >= playlist.size())
+		return;
+
+	const std::string rawUrl = playlist[index];
+	const bool n_is_local = !PathIsUrl(rawUrl);
+	const std::string n_url = NormalizeBrowserUrl(rawUrl, n_is_local, rewrite_youtube);
+
+	playlist_index = index;
+	media_state = OBS_MEDIA_STATE_PLAYING;
+	is_local = n_is_local;
+	url = n_url;
+
+	DestroyBrowser();
+	DestroyTextures();
+
+	if (!shutdown_on_invisible || obs_source_showing(source))
+		create_browser = true;
+
+	SignalPlaylistSelectionChanged(this);
+	obs_source_media_started(source);
+}
+
+void BrowserSource::StartPlaylistTransition(size_t index)
+{
+	if (!playlist_source || index >= playlist.size())
+		return;
+
+	if (!IsFadeTransition() && !IsCrossfadeTransition()) {
+		ResetTransition();
+		StartPlaylistIndex(index);
+		return;
+	}
+
+	ResetTransition();
+	pending_playlist_index = index;
+
+	if (IsCrossfadeTransition()) {
+		if (!CaptureTransitionTexture()) {
+			StartPlaylistIndex(index);
+			return;
+		}
+
+		transition_active = true;
+		transition_midpoint_pending = false;
+		transition_start_ns = 0;
+		StartPlaylistIndex(index);
+		return;
+	}
+
+	transition_active = true;
+	transition_midpoint_pending = texture != nullptr;
+	transition_start_ns = transition_midpoint_pending ? os_gettime_ns() : 0;
+
+	if (!transition_midpoint_pending)
+		StartPlaylistIndex(index);
+}
+
+void BrowserSource::SetPlaylistIndex(size_t index)
+{
+	if (!playlist_source || index >= playlist.size())
+		return;
+
+	const std::string rawUrl = playlist[index];
+	const bool n_is_local = !PathIsUrl(rawUrl);
+	const std::string n_url = NormalizeBrowserUrl(rawUrl, n_is_local, rewrite_youtube);
+	const bool reload = index != playlist_index || n_url != url || n_is_local != is_local;
+
+	if (reload) {
+		StartPlaylistTransition(index);
+		return;
+	}
+
+	playlist_index = index;
+	media_state = OBS_MEDIA_STATE_PLAYING;
+
+	SignalPlaylistSelectionChanged(this);
+	obs_source_media_started(source);
+}
+
+int64_t BrowserSource::GetMediaDuration() const
+{
+	return 0;
+}
+
+int64_t BrowserSource::GetMediaTime() const
+{
+	return 0;
+}
+
+void BrowserSource::SetMediaTime(int64_t ms)
+{
+	ExecuteOnBrowser(
+		[=](CefRefPtr<CefBrowser> cefBrowser) {
+			std::string script =
+				std::string("document.querySelectorAll('video,audio').forEach((media) => {"
+					    "try { media.currentTime = ") +
+				std::to_string((double)ms / 1000.0) + "; } catch (e) {}"
+								      "});";
+			CefRefPtr<CefFrame> frame = cefBrowser->GetMainFrame();
+			frame->ExecuteJavaScript(script, frame->GetURL(), 0);
+		},
+		true);
+}
+
+enum obs_media_state BrowserSource::GetMediaState() const
+{
+	return media_state;
+}
+
+int BrowserSource::GetPlaylistCount() const
+{
+	return (int)playlist.size();
+}
+
+int BrowserSource::GetPlaylistIndex() const
+{
+	return playlist.empty() ? -1 : (int)playlist_index;
+}
+
+std::string BrowserSource::GetPlaylistItem(size_t index) const
+{
+	return index < playlist.size() ? playlist[index] : std::string();
 }
 
 void BrowserSource::SetBrowser(CefRefPtr<CefBrowser> b)
@@ -453,6 +855,29 @@ inline void BrowserSource::SignalBeginFrame()
 #endif
 #endif
 
+static void SignalPlaylistUpdated(BrowserSource *bs)
+{
+	signal_handler_t *sh = obs_source_get_signal_handler(bs->source);
+	calldata_t cd = {};
+
+	calldata_set_int(&cd, "count", bs->GetPlaylistCount());
+	signal_handler_signal(sh, "playlist_updated", &cd);
+	calldata_free(&cd);
+}
+
+static void SignalPlaylistSelectionChanged(BrowserSource *bs)
+{
+	signal_handler_t *sh = obs_source_get_signal_handler(bs->source);
+	calldata_t cd = {};
+	int index = bs->GetPlaylistIndex();
+	std::string path = index >= 0 ? bs->GetPlaylistItem((size_t)index) : std::string();
+
+	calldata_set_int(&cd, "index", index);
+	calldata_set_string(&cd, "path", path.c_str());
+	signal_handler_signal(sh, "playlist_selection_changed", &cd);
+	calldata_free(&cd);
+}
+
 void BrowserSource::Update(obs_data_t *settings)
 {
 	if (settings) {
@@ -464,9 +889,19 @@ void BrowserSource::Update(obs_data_t *settings)
 		bool n_shutdown;
 		bool n_restart;
 		bool n_reroute;
+		bool n_allow_mic;
 		ControlLevel n_webpage_control_level;
+		bool n_playlist_looping = false;
+		bool n_rewrite_youtube = false;
+		BrowserTransitionMode n_transition_mode = transition_mode;
+		int n_transition_ms = transition_ms;
 		std::string n_url;
+		std::string n_raw_url;
 		std::string n_css;
+		std::string n_mic_device;
+		std::vector<std::string> n_playlist;
+		bool playlist_changed = false;
+		bool playlist_selection_changed = false;
 
 		n_is_local = obs_data_get_bool(settings, "is_local_file");
 		n_width = (int)obs_data_get_int(settings, "width");
@@ -476,35 +911,71 @@ void BrowserSource::Update(obs_data_t *settings)
 		n_shutdown = obs_data_get_bool(settings, "shutdown");
 		n_restart = obs_data_get_bool(settings, "restart_when_active");
 		n_css = obs_data_get_string(settings, "css");
-		n_url = obs_data_get_string(settings, n_is_local ? "local_file" : "url");
+		n_raw_url = obs_data_get_string(settings, n_is_local ? "local_file" : "url");
 		n_reroute = obs_data_get_bool(settings, "reroute_audio");
+		n_allow_mic = obs_data_get_bool(settings, "allow_mic");
+		n_mic_device = obs_data_get_string(settings, "mic_device");
+		if (n_mic_device.empty())
+			n_mic_device = "default";
 		n_webpage_control_level =
 			static_cast<ControlLevel>(obs_data_get_int(settings, "webpage_control_level"));
 
-		if (n_is_local && !n_url.empty()) {
-			n_url = CefURIEncode(n_url, false);
+		if (playlist_source) {
+			std::string oldActiveItem;
+			size_t oldPlaylistIndex = playlist_index;
 
-#ifdef _WIN32
-			size_t slash = n_url.find("%2F");
-			size_t colon = n_url.find("%3A");
+			if (!playlist.empty() && playlist_index < playlist.size())
+				oldActiveItem = playlist[playlist_index];
 
-			if (slash != std::string::npos && colon != std::string::npos && colon < slash)
-				n_url.replace(colon, 3, ":");
-#endif
+			n_playlist = LoadPlaylist(settings);
+			n_playlist_looping = obs_data_get_bool(settings, "looping");
+			n_rewrite_youtube = obs_data_get_bool(settings, "rewrite_youtube");
+			n_transition_mode = ClampBrowserTransitionMode((int)obs_data_get_int(settings, "transition_mode"));
+			n_transition_ms = (int)obs_data_get_int(settings, "transition_ms");
+			if (n_transition_ms < 0)
+				n_transition_ms = 0;
+			playlist_changed = n_playlist != playlist;
+			playlist_selection_changed = n_rewrite_youtube != rewrite_youtube;
 
-			while (n_url.find("%5C") != std::string::npos)
-				n_url.replace(n_url.find("%5C"), 3, "/");
+			if (playlist_changed && !oldActiveItem.empty()) {
+				auto it = std::find(n_playlist.begin(), n_playlist.end(), oldActiveItem);
 
-			while (n_url.find("%2F") != std::string::npos)
-				n_url.replace(n_url.find("%2F"), 3, "/");
+				if (it != n_playlist.end())
+					playlist_index = (size_t)std::distance(n_playlist.begin(), it);
+				else if (playlist_index >= n_playlist.size())
+					playlist_index = 0;
+			} else if (playlist_index >= n_playlist.size()) {
+				playlist_index = 0;
+			}
 
-			// Local files are routed through our custom scheme handler to give them acess to other local files
-			n_url = "http://absolute/" + n_url;
+			playlist = n_playlist;
+			playlist_looping = n_playlist_looping;
+			rewrite_youtube = n_rewrite_youtube;
+			transition_mode = n_transition_mode;
+			transition_ms = n_transition_ms;
+			if (!IsFadeTransition() && !IsCrossfadeTransition())
+				ResetTransition();
+
+			if (!playlist.empty()) {
+				n_raw_url = playlist[playlist_index];
+				n_is_local = !PathIsUrl(n_raw_url);
+			}
+
+			playlist_selection_changed |= oldPlaylistIndex != playlist_index;
 		}
+
+		n_url = NormalizeBrowserUrl(n_raw_url, n_is_local, playlist_source && rewrite_youtube);
 
 		if (n_is_local == is_local && n_fps_custom == fps_custom && n_fps == fps &&
 		    n_shutdown == shutdown_on_invisible && n_restart == restart && n_css == css && n_url == url &&
-		    n_reroute == reroute_audio && n_webpage_control_level == webpage_control_level) {
+		    n_reroute == reroute_audio && n_allow_mic == allow_mic && n_mic_device == mic_device &&
+		    n_webpage_control_level == webpage_control_level) {
+			if (playlist_source) {
+				if (playlist_changed)
+					SignalPlaylistUpdated(this);
+				if (playlist_changed || playlist_selection_changed)
+					SignalPlaylistSelectionChanged(this);
+			}
 
 			if (n_width == width && n_height == height)
 				return;
@@ -530,16 +1001,26 @@ void BrowserSource::Update(obs_data_t *settings)
 		fps_custom = n_fps_custom;
 		shutdown_on_invisible = n_shutdown;
 		reroute_audio = n_reroute;
+		allow_mic = n_allow_mic;
+		mic_device = n_mic_device;
 		webpage_control_level = n_webpage_control_level;
 		restart = n_restart;
 		css = n_css;
 		url = n_url;
 
 		obs_source_set_audio_active(source, reroute_audio);
+
+		if (playlist_source) {
+			if (playlist_changed)
+				SignalPlaylistUpdated(this);
+			if (playlist_changed || playlist_selection_changed)
+				SignalPlaylistSelectionChanged(this);
+		}
 	}
 
 	DestroyBrowser();
 	DestroyTextures();
+	ResetTransition();
 
 	if (!shutdown_on_invisible || obs_source_showing(source))
 		create_browser = true;
@@ -549,6 +1030,30 @@ void BrowserSource::Update(obs_data_t *settings)
 
 void BrowserSource::Tick()
 {
+	if (transition_active) {
+		const uint64_t now = os_gettime_ns();
+		const uint64_t durationNs = TransitionDurationNs();
+		if (!durationNs) {
+			ResetTransition();
+		} else if (transition_start_ns == 0) {
+			if (texture) {
+				transition_start_ns = now;
+				if (IsFadeTransition() && !transition_midpoint_pending)
+					transition_start_ns -= durationNs / 2;
+			}
+		} else {
+			const uint64_t elapsed = now > transition_start_ns ? now - transition_start_ns : 0;
+
+			if (IsFadeTransition() && transition_midpoint_pending && elapsed >= durationNs / 2) {
+				transition_midpoint_pending = false;
+				StartPlaylistIndex(pending_playlist_index);
+				transition_start_ns = 0;
+			} else if (elapsed >= durationNs) {
+				ResetTransition();
+			}
+		}
+	}
+
 	if (create_browser && CreateBrowser())
 		create_browser = false;
 #if defined(ENABLE_BROWSER_SHARED_TEXTURE)
@@ -572,59 +1077,105 @@ void BrowserSource::Tick()
 
 extern void ProcessCef();
 
+static gs_effect_t *GetBrowserEffect()
+{
+#ifdef __APPLE__
+	int type = gs_get_device_type();
+
+	if (type == GS_DEVICE_OPENGL)
+		return obs_get_base_effect((hwaccel) ? OBS_EFFECT_DEFAULT_RECT : OBS_EFFECT_DEFAULT);
+#endif
+
+	return obs_get_base_effect(OBS_EFFECT_DEFAULT);
+}
+
+static void DrawBrowserTexture(BrowserSource *bs, gs_texture_t *inputTexture, float opacity, bool flip,
+			       bool useExtraTexture)
+{
+	if (!inputTexture || opacity <= 0.0f)
+		return;
+
+	gs_effect_t *effect = GetBrowserEffect();
+	bool linearSample = true;
+	gs_texture_t *drawTexture = inputTexture;
+
+	if (useExtraTexture) {
+		linearSample = bs->extra_texture == nullptr;
+		if (!linearSample && !obs_source_get_texcoords_centered(bs->source)) {
+			gs_copy_texture(bs->extra_texture, inputTexture);
+			drawTexture = bs->extra_texture;
+			linearSample = true;
+		}
+	}
+
+	gs_eparam_t *const image = gs_effect_get_param_by_name(effect, "image");
+	gs_eparam_t *const opacityParam = gs_effect_get_param_by_name(effect, "opacity");
+	const bool forceOpacityTech = opacityParam && opacity < 0.999f;
+
+	if (opacityParam)
+		gs_effect_set_float(opacityParam, opacity);
+
+	const char *tech;
+	if (forceOpacityTech || linearSample) {
+		gs_effect_set_texture_srgb(image, drawTexture);
+		tech = "Draw";
+	} else {
+		gs_effect_set_texture(image, drawTexture);
+		tech = "DrawSrgbDecompress";
+	}
+
+	const uint32_t flipFlag = flip ? GS_FLIP_V : 0;
+	while (gs_effect_loop(effect, tech))
+		gs_draw_sprite(drawTexture, flipFlag, 0, 0);
+
+	if (opacityParam)
+		gs_effect_set_float(opacityParam, 1.0f);
+}
+
 void BrowserSource::Render()
 {
 	bool flip = false;
+	float currentOpacity = 1.0f;
+	float transitionOpacity = 0.0f;
 #if defined(ENABLE_BROWSER_SHARED_TEXTURE) && CHROME_VERSION_BUILD < 6367
 	flip = hwaccel;
 #endif
 
-	if (texture) {
-#ifdef __APPLE__
-		int type = gs_get_device_type();
-		gs_effect_t *effect;
-
-		if (type == GS_DEVICE_OPENGL) {
-			effect = obs_get_base_effect((hwaccel) ? OBS_EFFECT_DEFAULT_RECT : OBS_EFFECT_DEFAULT);
+	if (playlist_source && transition_active) {
+		const uint64_t durationNs = TransitionDurationNs();
+		const uint64_t now = os_gettime_ns();
+		if (transition_start_ns == 0) {
+			if (IsCrossfadeTransition()) {
+				transitionOpacity = 1.0f;
+				currentOpacity = 0.0f;
+			} else if (IsFadeTransition() && !transition_midpoint_pending) {
+				currentOpacity = 0.0f;
+			}
 		} else {
-			effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+			const uint64_t elapsed = now > transition_start_ns ? now - transition_start_ns : 0;
+			const float progress =
+				durationNs ? ClampFloat((float)elapsed / (float)durationNs, 0.0f, 1.0f) : 1.0f;
+
+			if (IsCrossfadeTransition()) {
+				transitionOpacity = 1.0f - progress;
+				currentOpacity = progress;
+			} else if (IsFadeTransition()) {
+				currentOpacity = progress < 0.5f ? 1.0f - progress * 2.0f : (progress - 0.5f) * 2.0f;
+			}
 		}
-#else
-		gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-#endif
+	}
 
-		bool linear_sample = extra_texture == NULL;
-		gs_texture_t *draw_texture = texture;
-		if (!linear_sample && !obs_source_get_texcoords_centered(source)) {
-			gs_copy_texture(extra_texture, texture);
-			draw_texture = extra_texture;
-
-			linear_sample = true;
-		}
-
+	if (texture || transition_texture) {
 		const bool previous = gs_framebuffer_srgb_enabled();
 		gs_enable_framebuffer_srgb(true);
 
 		gs_blend_state_push();
 		gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 
-		gs_eparam_t *const image = gs_effect_get_param_by_name(effect, "image");
-
-		const char *tech;
-		if (linear_sample) {
-			gs_effect_set_texture_srgb(image, draw_texture);
-			tech = "Draw";
-		} else {
-			gs_effect_set_texture(image, draw_texture);
-			tech = "DrawSrgbDecompress";
-		}
-
-		const uint32_t flip_flag = flip ? GS_FLIP_V : 0;
-		while (gs_effect_loop(effect, tech))
-			gs_draw_sprite(draw_texture, flip_flag, 0, 0);
+		DrawBrowserTexture(this, transition_texture, transitionOpacity, flip, false);
+		DrawBrowserTexture(this, texture, currentOpacity, flip, true);
 
 		gs_blend_state_pop();
-
 		gs_enable_framebuffer_srgb(previous);
 	}
 

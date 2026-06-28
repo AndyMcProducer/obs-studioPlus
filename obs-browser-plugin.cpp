@@ -27,6 +27,7 @@
 #include <sstream>
 #include <thread>
 #include <mutex>
+#include <vector>
 #include <nlohmann/json.hpp>
 #include <obs-websocket-api.h>
 
@@ -39,9 +40,15 @@
 
 #ifdef _WIN32
 #include <util/windows/ComPtr.hpp>
+#include <mmdeviceapi.h>
+#include <propsys.h>
 #include <dxgi.h>
 #include <dxgi1_2.h>
 #include <d3d11.h>
+static const PROPERTYKEY PKEY_Device_FriendlyName = {
+	{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}},
+	14,
+};
 #else
 #include "signal-restore.hpp"
 #endif
@@ -120,9 +127,17 @@ margin: 0px auto; \
 overflow: hidden; \
 }";
 
-static void browser_source_get_defaults(obs_data_t *settings)
+static constexpr const char *S_PLAYLIST = "playlist";
+static constexpr const char *S_ALLOW_MIC = "allow_mic";
+static constexpr const char *S_MIC_DEVICE = "mic_device";
+static constexpr const char *BROWSER_MIC_DEFAULT = "default";
+static constexpr const char *BROWSER_SOURCE_ID = "browser_source";
+static constexpr const char *BROWSER_PLAYLIST_SOURCE_ID = "browser_playlist_source";
+
+static void browser_source_get_defaults_internal(obs_data_t *settings, bool playlist_source)
 {
-	obs_data_set_default_string(settings, "url", "https://obsproject.com/browser-source");
+	obs_data_set_default_string(settings, "url",
+				    playlist_source ? "about:blank" : "https://obsproject.com/browser-source");
 	obs_data_set_default_int(settings, "width", 800);
 	obs_data_set_default_int(settings, "height", 600);
 	obs_data_set_default_int(settings, "fps", 30);
@@ -136,6 +151,25 @@ static void browser_source_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "webpage_control_level", (int)DEFAULT_CONTROL_LEVEL);
 	obs_data_set_default_string(settings, "css", default_css);
 	obs_data_set_default_bool(settings, "reroute_audio", false);
+	obs_data_set_default_bool(settings, S_ALLOW_MIC, false);
+	obs_data_set_default_string(settings, S_MIC_DEVICE, BROWSER_MIC_DEFAULT);
+
+	if (playlist_source) {
+		obs_data_set_default_bool(settings, "looping", false);
+		obs_data_set_default_bool(settings, "rewrite_youtube", false);
+		obs_data_set_default_int(settings, "transition_mode", BROWSER_TRANSITION_CROSSFADE);
+		obs_data_set_default_int(settings, "transition_ms", 0);
+	}
+}
+
+static void browser_source_get_defaults(obs_data_t *settings)
+{
+	browser_source_get_defaults_internal(settings, false);
+}
+
+static void browser_playlist_source_get_defaults(obs_data_t *settings)
+{
+	browser_source_get_defaults_internal(settings, true);
 }
 
 static bool is_local_file_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
@@ -158,13 +192,125 @@ static bool is_fps_custom(obs_properties_t *props, obs_property_t *, obs_data_t 
 	return true;
 }
 
-static obs_properties_t *browser_source_get_properties(void *data)
+static bool is_mic_enabled_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	bool enabled = obs_data_get_bool(settings, S_ALLOW_MIC);
+	obs_property_t *micDevice = obs_properties_get(props, S_MIC_DEVICE);
+	obs_property_set_visible(micDevice, enabled);
+
+	return true;
+}
+
+#ifdef _WIN32
+static std::string WideToUtf8(const wchar_t *value)
+{
+	if (!value || !*value)
+		return std::string();
+
+	size_t len = wcslen(value);
+	size_t size = os_wcs_to_utf8(value, len, nullptr, 0);
+	if (!size)
+		return std::string();
+
+	std::vector<char> buffer(size + 1);
+	os_wcs_to_utf8(value, len, buffer.data(), buffer.size());
+	return std::string(buffer.data());
+}
+
+static std::vector<std::string> GetBrowserMicDevices()
+{
+	std::vector<std::string> devices;
+	ComPtr<IMMDeviceEnumerator> enumerator;
+	ComPtr<IMMDeviceCollection> collection;
+	UINT count = 0;
+
+	HRESULT res = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+				       (void **)enumerator.Assign());
+	if (FAILED(res))
+		return devices;
+
+	res = enumerator->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, collection.Assign());
+	if (FAILED(res))
+		return devices;
+
+	res = collection->GetCount(&count);
+	if (FAILED(res))
+		return devices;
+
+	for (UINT i = 0; i < count; i++) {
+		ComPtr<IMMDevice> device;
+		ComPtr<IPropertyStore> store;
+		PROPVARIANT nameVar;
+		std::string deviceName;
+
+		res = collection->Item(i, device.Assign());
+		if (FAILED(res))
+			continue;
+
+		res = device->OpenPropertyStore(STGM_READ, store.Assign());
+		if (FAILED(res))
+			continue;
+
+		PropVariantInit(&nameVar);
+		res = store->GetValue(PKEY_Device_FriendlyName, &nameVar);
+		if (SUCCEEDED(res) && nameVar.vt == VT_LPWSTR)
+			deviceName = WideToUtf8(nameVar.pwszVal);
+		PropVariantClear(&nameVar);
+
+		if (!deviceName.empty())
+			devices.emplace_back(deviceName);
+	}
+
+	return devices;
+}
+#endif
+
+static void AddBrowserMicDevices(obs_property_t *prop, const char *currentDevice)
+{
+	bool currentFound = !currentDevice || !*currentDevice || strcmp(currentDevice, BROWSER_MIC_DEFAULT) == 0;
+	obs_property_list_add_string(prop, obs_module_text("Default"), BROWSER_MIC_DEFAULT);
+
+#ifdef _WIN32
+	for (const std::string &device : GetBrowserMicDevices()) {
+		obs_property_list_add_string(prop, device.c_str(), device.c_str());
+		if (currentDevice && device == currentDevice)
+			currentFound = true;
+	}
+#endif
+
+	if (!currentFound)
+		obs_property_list_add_string(prop, currentDevice, currentDevice);
+}
+
+static obs_properties_t *browser_source_get_properties_internal(void *data, bool playlist_source)
 {
 	obs_properties_t *props = obs_properties_create();
 	BrowserSource *bs = static_cast<BrowserSource *>(data);
 	DStr path;
 
 	obs_properties_set_flags(props, OBS_PROPERTIES_DEFER_UPDATE);
+
+	if (playlist_source) {
+		obs_properties_add_editable_list(props, S_PLAYLIST, obs_module_text("Playlist"),
+						 OBS_EDITABLE_LIST_TYPE_STRINGS, "", "");
+		obs_properties_add_bool(props, "looping", obs_module_text("Looping"));
+		obs_properties_add_bool(props, "rewrite_youtube", obs_module_text("RewriteYouTube"));
+
+		obs_property_t *transition = obs_properties_add_list(props, "transition_mode",
+								     obs_module_text("TransitionMode"),
+								     OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+		obs_property_list_add_int(transition, obs_module_text("TransitionMode.Cut"),
+					  BROWSER_TRANSITION_CUT);
+		obs_property_list_add_int(transition, obs_module_text("TransitionMode.Fade"),
+					  BROWSER_TRANSITION_FADE);
+		obs_property_list_add_int(transition, obs_module_text("TransitionMode.Crossfade"),
+					  BROWSER_TRANSITION_CROSSFADE);
+
+		obs_property_t *duration = obs_properties_add_int_slider(
+			props, "transition_ms", obs_module_text("TransitionDuration"), 0, 5000, 50);
+		obs_property_int_set_suffix(duration, " ms");
+	}
+
 	obs_property_t *prop = obs_properties_add_bool(props, "is_local_file", obs_module_text("LocalFile"));
 
 	if (bs && !bs->url.empty()) {
@@ -185,6 +331,13 @@ static obs_properties_t *browser_source_get_properties(void *data)
 	obs_properties_add_int(props, "height", obs_module_text("Height"), 1, 8192, 1);
 
 	obs_properties_add_bool(props, "reroute_audio", obs_module_text("RerouteAudio"));
+	obs_property_t *allowMic = obs_properties_add_bool(props, S_ALLOW_MIC, obs_module_text("AllowMicrophone"));
+	obs_property_set_modified_callback(allowMic, is_mic_enabled_modified);
+
+	obs_property_t *micDevice = obs_properties_add_list(props, S_MIC_DEVICE, obs_module_text("MicrophoneDevice"),
+						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	AddBrowserMicDevices(micDevice, bs ? bs->mic_device.c_str() : nullptr);
+	obs_property_set_visible(micDevice, bs && bs->allow_mic);
 
 	obs_property_t *fps_set = obs_properties_add_bool(props, "fps_custom", obs_module_text("CustomFrameRate"));
 	obs_property_set_modified_callback(fps_set, is_fps_custom);
@@ -225,6 +378,16 @@ static obs_properties_t *browser_source_get_properties(void *data)
 		},
 		bs);
 	return props;
+}
+
+static obs_properties_t *browser_source_get_properties(void *data)
+{
+	return browser_source_get_properties_internal(data, false);
+}
+
+static obs_properties_t *browser_playlist_source_get_properties(void *data)
+{
+	return browser_source_get_properties_internal(data, true);
 }
 
 static void missing_file_callback(void *src, const char *new_path, void *data)
@@ -427,20 +590,23 @@ extern "C" EXPORT void obs_browser_initialize(void)
 	}
 }
 
-void RegisterBrowserSource()
+static void RegisterBrowserSourceInternal(bool playlist_source)
 {
 	struct obs_source_info info = {};
-	info.id = "browser_source";
+	info.id = playlist_source ? BROWSER_PLAYLIST_SOURCE_ID : BROWSER_SOURCE_ID;
 	info.type = OBS_SOURCE_TYPE_INPUT;
 	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_INTERACTION |
 			    OBS_SOURCE_DO_NOT_DUPLICATE | OBS_SOURCE_SRGB;
-	info.get_properties = browser_source_get_properties;
-	info.get_defaults = browser_source_get_defaults;
+	if (playlist_source)
+		info.output_flags |= OBS_SOURCE_CONTROLLABLE_MEDIA;
+	info.get_properties = playlist_source ? browser_playlist_source_get_properties : browser_source_get_properties;
+	info.get_defaults = playlist_source ? browser_playlist_source_get_defaults : browser_source_get_defaults;
 	info.icon_type = OBS_ICON_TYPE_BROWSER;
 
-	info.get_name = [](void *) {
-		return obs_module_text("BrowserSource");
+	info.get_name = [](void *data) {
+		return obs_module_text(data ? "BrowserPlaylistSource" : "BrowserSource");
 	};
+	info.type_data = playlist_source ? (void *)1 : nullptr;
 	info.create = [](obs_data_t *settings, obs_source_t *source) -> void * {
 		obs_browser_initialize();
 		return new BrowserSource(settings, source);
@@ -496,7 +662,43 @@ void RegisterBrowserSource()
 		static_cast<BrowserSource *>(data)->SetActive(false);
 	};
 
+	if (playlist_source) {
+		info.media_play_pause = [](void *data, bool pause) {
+			static_cast<BrowserSource *>(data)->PlayPause(pause);
+		};
+		info.media_restart = [](void *data) {
+			static_cast<BrowserSource *>(data)->Refresh();
+		};
+		info.media_stop = [](void *data) {
+			static_cast<BrowserSource *>(data)->Stop();
+		};
+		info.media_next = [](void *data) {
+			static_cast<BrowserSource *>(data)->PlaylistNext();
+		};
+		info.media_previous = [](void *data) {
+			static_cast<BrowserSource *>(data)->PlaylistPrevious();
+		};
+		info.media_get_duration = [](void *data) {
+			return static_cast<BrowserSource *>(data)->GetMediaDuration();
+		};
+		info.media_get_time = [](void *data) {
+			return static_cast<BrowserSource *>(data)->GetMediaTime();
+		};
+		info.media_set_time = [](void *data, int64_t ms) {
+			static_cast<BrowserSource *>(data)->SetMediaTime(ms);
+		};
+		info.media_get_state = [](void *data) {
+			return static_cast<BrowserSource *>(data)->GetMediaState();
+		};
+	}
+
 	obs_register_source(&info);
+}
+
+void RegisterBrowserSource()
+{
+	RegisterBrowserSourceInternal(false);
+	RegisterBrowserSourceInternal(true);
 }
 
 /* ========================================================================= */

@@ -31,6 +31,7 @@
 #include <include/cef_base.h>
 #include <include/cef_task.h>
 #include <include/cef_client.h>
+#include <include/cef_permission_handler.h>
 #include <include/cef_parser.h>
 #include <include/cef_scheme.h>
 #include <include/cef_version.h>

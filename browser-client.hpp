@@ -33,10 +33,13 @@ class BrowserClient : public CefClient,
 		      public CefContextMenuHandler,
 		      public CefRenderHandler,
 		      public CefAudioHandler,
+		      public CefPermissionHandler,
 		      public CefLoadHandler {
 
 	bool sharing_available = false;
 	bool reroute_audio = true;
+	bool allow_mic = false;
+	std::string mic_device;
 	ControlLevel webpage_control_level = DEFAULT_CONTROL_LEVEL;
 
 	inline bool valid() const;
@@ -53,10 +56,12 @@ public:
 	ChannelLayout channel_layout;
 	int frames_per_buffer;
 
-	inline BrowserClient(BrowserSource *bs_, bool sharing_avail, bool reroute_audio_,
-			     ControlLevel webpage_control_level_)
+	inline BrowserClient(BrowserSource *bs_, bool sharing_avail, bool reroute_audio_, bool allow_mic_,
+			     const std::string &mic_device_, ControlLevel webpage_control_level_)
 		: sharing_available(sharing_avail),
 		  reroute_audio(reroute_audio_),
+		  allow_mic(allow_mic_),
+		  mic_device(mic_device_),
 		  webpage_control_level(webpage_control_level_),
 		  bs(bs_)
 	{
@@ -70,6 +75,7 @@ public:
 	virtual CefRefPtr<CefRequestHandler> GetRequestHandler() override;
 	virtual CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override;
 	virtual CefRefPtr<CefAudioHandler> GetAudioHandler() override;
+	virtual CefRefPtr<CefPermissionHandler> GetPermissionHandler() override;
 
 	virtual bool OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
 					      CefProcessId source_process,
@@ -143,7 +149,18 @@ public:
 	const int kFramesPerBuffer = 1024;
 	virtual bool GetAudioParameters(CefRefPtr<CefBrowser> browser, CefAudioParameters &params) override;
 
+	/* CefPermissionHandler */
+	virtual bool OnRequestMediaAccessPermission(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+						    const CefString &requesting_origin,
+						    uint32_t requested_permissions,
+						    CefRefPtr<CefMediaAccessCallback> callback) override;
+	virtual bool OnShowPermissionPrompt(CefRefPtr<CefBrowser> browser, uint64_t prompt_id,
+					    const CefString &requesting_origin, uint32_t requested_permissions,
+					    CefRefPtr<CefPermissionPromptCallback> callback) override;
+
 	/* CefLoadHandler */
+	virtual void OnLoadStart(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+				 TransitionType transition_type) override;
 	virtual void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int httpStatusCode) override;
 
 	IMPLEMENT_REFCOUNTING(BrowserClient);

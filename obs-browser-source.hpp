@@ -26,6 +26,7 @@
 #include <functional>
 #include <string>
 #include <mutex>
+#include <vector>
 
 enum class ControlLevel : int {
 	None,
@@ -36,6 +37,12 @@ enum class ControlLevel : int {
 	All,
 };
 inline constexpr ControlLevel DEFAULT_CONTROL_LEVEL = ControlLevel::ReadObs;
+
+enum BrowserTransitionMode {
+	BROWSER_TRANSITION_CUT,
+	BROWSER_TRANSITION_FADE,
+	BROWSER_TRANSITION_CROSSFADE,
+};
 
 extern bool hwaccel;
 
@@ -52,6 +59,7 @@ struct BrowserSource {
 
 	std::string url;
 	std::string css;
+	std::vector<std::string> playlist;
 	gs_texture_t *texture = nullptr;
 	gs_texture_t *extra_texture = nullptr;
 	uint32_t last_cx = 0;
@@ -74,8 +82,22 @@ struct BrowserSource {
 	bool restart = false;
 	bool shutdown_on_invisible = false;
 	bool is_local = false;
+	bool playlist_source = false;
+	bool playlist_looping = false;
+	bool rewrite_youtube = false;
+	size_t playlist_index = 0;
+	size_t pending_playlist_index = 0;
+	int transition_ms = 0;
+	BrowserTransitionMode transition_mode = BROWSER_TRANSITION_CROSSFADE;
+	bool transition_active = false;
+	bool transition_midpoint_pending = false;
+	uint64_t transition_start_ns = 0;
+	gs_texture_t *transition_texture = nullptr;
 	bool first_update = true;
 	bool reroute_audio = true;
+	bool allow_mic = false;
+	std::string mic_device;
+	enum obs_media_state media_state = OBS_MEDIA_STATE_PLAYING;
 	std::atomic<bool> destroying = false;
 	ControlLevel webpage_control_level = DEFAULT_CONTROL_LEVEL;
 #if defined(BROWSER_EXTERNAL_BEGIN_FRAME_ENABLED) && defined(ENABLE_BROWSER_SHARED_TEXTURE)
@@ -100,6 +122,16 @@ struct BrowserSource {
 		obs_leave_graphics();
 	}
 
+	inline void DestroyTransitionTexture()
+	{
+		obs_enter_graphics();
+		if (transition_texture) {
+			gs_texture_destroy(transition_texture);
+			transition_texture = nullptr;
+		}
+		obs_leave_graphics();
+	}
+
 	/* ---------------------------- */
 
 	bool CreateBrowser();
@@ -116,6 +148,13 @@ struct BrowserSource {
 	void Update(obs_data_t *settings = nullptr);
 	void Tick();
 	void Render();
+	uint64_t TransitionDurationNs() const;
+	bool IsFadeTransition() const;
+	bool IsCrossfadeTransition() const;
+	void ResetTransition();
+	bool CaptureTransitionTexture();
+	void StartPlaylistTransition(size_t index);
+	void StartPlaylistIndex(size_t index);
 
 	void SendMouseClick(const struct obs_mouse_event *event, int32_t type, bool mouse_up, uint32_t click_count);
 	void SendMouseMove(const struct obs_mouse_event *event, bool mouse_leave);
@@ -125,6 +164,18 @@ struct BrowserSource {
 	void SetShowing(bool showing);
 	void SetActive(bool active);
 	void Refresh();
+	void PlayPause(bool pause);
+	void Stop();
+	void PlaylistNext();
+	void PlaylistPrevious();
+	void SetPlaylistIndex(size_t index);
+	int64_t GetMediaDuration() const;
+	int64_t GetMediaTime() const;
+	void SetMediaTime(int64_t ms);
+	enum obs_media_state GetMediaState() const;
+	int GetPlaylistCount() const;
+	int GetPlaylistIndex() const;
+	std::string GetPlaylistItem(size_t index) const;
 
 #if defined(BROWSER_EXTERNAL_BEGIN_FRAME_ENABLED) && defined(ENABLE_BROWSER_SHARED_TEXTURE)
 	inline void SignalBeginFrame();

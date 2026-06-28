@@ -71,6 +71,11 @@ CefRefPtr<CefAudioHandler> BrowserClient::GetAudioHandler()
 	return reroute_audio ? this : nullptr;
 }
 
+CefRefPtr<CefPermissionHandler> BrowserClient::GetPermissionHandler()
+{
+	return allow_mic ? this : nullptr;
+}
+
 CefRefPtr<CefRequestHandler> BrowserClient::GetRequestHandler()
 {
 	return this;
@@ -604,6 +609,107 @@ bool BrowserClient::GetAudioParameters(CefRefPtr<CefBrowser> browser, CefAudioPa
 	params.sample_rate = (int)audio_output_get_sample_rate(obs_get_audio());
 	params.frames_per_buffer = kFramesPerBuffer;
 	return true;
+}
+
+bool BrowserClient::OnRequestMediaAccessPermission(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame,
+						   const CefString &requesting_origin,
+						   uint32_t requested_permissions,
+						   CefRefPtr<CefMediaAccessCallback> callback)
+{
+	UNUSED_PARAMETER(browser);
+	UNUSED_PARAMETER(frame);
+	UNUSED_PARAMETER(requesting_origin);
+
+	const uint32_t micPermission = CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE;
+	const bool micOnly = (requested_permissions & micPermission) != 0 &&
+			     (requested_permissions & ~micPermission) == 0;
+
+	if (valid() && allow_mic && micOnly)
+		callback->Continue(requested_permissions);
+	else
+		callback->Cancel();
+
+	return true;
+}
+
+bool BrowserClient::OnShowPermissionPrompt(CefRefPtr<CefBrowser> browser, uint64_t prompt_id,
+					   const CefString &requesting_origin, uint32_t requested_permissions,
+					   CefRefPtr<CefPermissionPromptCallback> callback)
+{
+	UNUSED_PARAMETER(browser);
+	UNUSED_PARAMETER(prompt_id);
+	UNUSED_PARAMETER(requesting_origin);
+
+	const uint32_t micPermission = CEF_PERMISSION_TYPE_MIC_STREAM;
+	const bool micOnly = (requested_permissions & micPermission) != 0 &&
+			     (requested_permissions & ~micPermission) == 0;
+
+	if (!micOnly)
+		return false;
+
+	callback->Continue(valid() && allow_mic ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
+	return true;
+}
+
+static std::string BrowserMicDeviceScript(const std::string &micDevice)
+{
+	if (micDevice.empty() || micDevice == "default")
+		return std::string();
+
+	std::string desired = nlohmann::json(micDevice).dump();
+	return std::string("(() => {\n"
+			   "  const desired = ") +
+	       desired +
+	       ";\n"
+	       "  const mediaDevices = navigator.mediaDevices;\n"
+	       "  if (!mediaDevices || mediaDevices.__obsMicOverride) return;\n"
+	       "  const nativeGetUserMedia = mediaDevices.getUserMedia && mediaDevices.getUserMedia.bind(mediaDevices);\n"
+	       "  const nativeEnumerateDevices = mediaDevices.enumerateDevices && "
+	       "mediaDevices.enumerateDevices.bind(mediaDevices);\n"
+	       "  if (!nativeGetUserMedia || !nativeEnumerateDevices) return;\n"
+	       "  Object.defineProperty(mediaDevices, '__obsMicOverride', {value: true});\n"
+	       "  const desiredLower = desired.toLowerCase();\n"
+	       "  const stopTracks = (stream) => stream && stream.getTracks().forEach((track) => track.stop());\n"
+	       "  const findDevice = async () => {\n"
+	       "    let devices = await nativeEnumerateDevices();\n"
+	       "    let inputs = devices.filter((device) => device.kind === 'audioinput');\n"
+	       "    let match = inputs.find((device) => device.deviceId === desired || device.label === desired || "
+	       "device.label.toLowerCase().includes(desiredLower));\n"
+	       "    if (match || inputs.some((device) => device.label)) return match;\n"
+	       "    try {\n"
+	       "      const stream = await nativeGetUserMedia({audio: true, video: false});\n"
+	       "      stopTracks(stream);\n"
+	       "      devices = await nativeEnumerateDevices();\n"
+	       "      inputs = devices.filter((device) => device.kind === 'audioinput');\n"
+	       "      match = inputs.find((device) => device.deviceId === desired || device.label === desired || "
+	       "device.label.toLowerCase().includes(desiredLower));\n"
+	       "    } catch (error) {}\n"
+	       "    return match;\n"
+	       "  };\n"
+	       "  mediaDevices.getUserMedia = async (constraints = {}) => {\n"
+	       "    if (!constraints || constraints.audio === false) return nativeGetUserMedia(constraints);\n"
+	       "    const match = await findDevice();\n"
+	       "    if (!match) return nativeGetUserMedia(constraints);\n"
+	       "    const nextConstraints = Object.assign({}, constraints);\n"
+	       "    let audio = constraints.audio;\n"
+	       "    if (audio === true || audio === undefined) audio = {};\n"
+	       "    else if (typeof audio !== 'object') return nativeGetUserMedia(constraints);\n"
+	       "    else audio = Object.assign({}, audio);\n"
+	       "    audio.deviceId = {exact: match.deviceId};\n"
+	       "    nextConstraints.audio = audio;\n"
+	       "    return nativeGetUserMedia(nextConstraints);\n"
+	       "  };\n"
+	       "})();";
+}
+
+void BrowserClient::OnLoadStart(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, TransitionType)
+{
+	if (!valid() || !allow_mic)
+		return;
+
+	std::string script = BrowserMicDeviceScript(mic_device);
+	if (!script.empty())
+		frame->ExecuteJavaScript(script, frame->GetURL(), 0);
 }
 
 void BrowserClient::OnLoadEnd(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, int)
