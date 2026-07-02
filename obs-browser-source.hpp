@@ -97,6 +97,14 @@ struct BrowserSource {
 	bool reroute_audio = true;
 	bool allow_mic = false;
 	std::string mic_device;
+	bool allow_video = false;
+	std::string video_source;
+	int video_input_width = 640;
+	int video_input_height = 480;
+	uint64_t last_video_input_frame_ns = 0;
+	gs_texrender_t *video_input_render = nullptr;
+	gs_stagesurf_t *video_input_stage = nullptr;
+	std::vector<uint8_t> video_input_frame;
 	enum obs_media_state media_state = OBS_MEDIA_STATE_PLAYING;
 	std::atomic<bool> destroying = false;
 	ControlLevel webpage_control_level = DEFAULT_CONTROL_LEVEL;
@@ -132,6 +140,21 @@ struct BrowserSource {
 		obs_leave_graphics();
 	}
 
+	inline void DestroyVideoInputResources()
+	{
+		obs_enter_graphics();
+		if (video_input_stage) {
+			gs_stagesurface_destroy(video_input_stage);
+			video_input_stage = nullptr;
+		}
+		if (video_input_render) {
+			gs_texrender_destroy(video_input_render);
+			video_input_render = nullptr;
+		}
+		obs_leave_graphics();
+		video_input_frame.clear();
+	}
+
 	/* ---------------------------- */
 
 	bool CreateBrowser();
@@ -148,6 +171,11 @@ struct BrowserSource {
 	void Update(obs_data_t *settings = nullptr);
 	void Tick();
 	void Render();
+	uint64_t VideoInputFrameIntervalNs() const;
+	bool EnsureVideoInputResources();
+	void RenderVideoInputFrame();
+	void SendVideoInputFrame();
+	void StopVideoInputFrame();
 	uint64_t TransitionDurationNs() const;
 	bool IsFadeTransition() const;
 	bool IsCrossfadeTransition() const;

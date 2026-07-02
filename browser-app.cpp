@@ -19,6 +19,7 @@
 #include "browser-app.hpp"
 #include "browser-version.h"
 #include <nlohmann/json.hpp>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -38,6 +39,15 @@
 	}
 #endif
 
+class VideoFrameBufferReleaseCallback : public CefV8ArrayBufferReleaseCallback {
+public:
+	void ReleaseBuffer(void *buffer) override
+	{
+		free(buffer);
+	}
+
+	IMPLEMENT_REFCOUNTING(VideoFrameBufferReleaseCallback);
+};
 CefRefPtr<CefRenderProcessHandler> BrowserApp::GetRenderProcessHandler()
 {
 	return this;
@@ -142,6 +152,11 @@ void BrowserApp::ExecuteJSFunction(CefRefPtr<CefBrowser> browser, const char *fu
 
 		CefRefPtr<CefV8Value> globalObj = context->GetGlobal();
 		CefRefPtr<CefV8Value> obsStudioObj = globalObj->GetValue("obsstudio");
+		if (!obsStudioObj || !obsStudioObj->IsObject()) {
+			context->Exit();
+			continue;
+		}
+
 		CefRefPtr<CefV8Value> jsFunction = obsStudioObj->GetValue(functionName);
 
 		if (jsFunction && jsFunction->IsFunction())
@@ -268,6 +283,34 @@ bool BrowserApp::OnProcessMessageReceived(CefRefPtr<CefBrowser> browser, CefRefP
 
 			context->Exit();
 		}
+
+	} else if (message->GetName() == "ObsBrowserVideoFrame") {
+		const int width = args->GetInt(0);
+		const int height = args->GetInt(1);
+		CefRefPtr<CefBinaryValue> binary = args->GetBinary(2);
+		if (!binary || width <= 0 || height <= 0)
+			return true;
+
+		const size_t size = binary->GetSize();
+		void *buffer = malloc(size);
+		if (!buffer)
+			return true;
+
+		if (binary->GetData(buffer, size, 0) != size) {
+			free(buffer);
+			return true;
+		}
+
+		CefV8ValueList arguments;
+		arguments.push_back(CefV8Value::CreateInt(width));
+		arguments.push_back(CefV8Value::CreateInt(height));
+		arguments.push_back(
+			CefV8Value::CreateArrayBuffer(buffer, size, new VideoFrameBufferReleaseCallback()));
+		ExecuteJSFunction(browser, "__obsBrowserVideoInputFrame", arguments);
+
+	} else if (message->GetName() == "ObsBrowserVideoStop") {
+		CefV8ValueList arguments;
+		ExecuteJSFunction(browser, "__obsBrowserVideoInputStop", arguments);
 
 	} else if (message->GetName() == "executeCallback") {
 		CefRefPtr<CefV8Context> context = browser->GetMainFrame()->GetV8Context();

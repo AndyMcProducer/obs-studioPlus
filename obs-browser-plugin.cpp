@@ -24,6 +24,7 @@
 #include <obs-module.h>
 #include <obs.hpp>
 #include <functional>
+#include <algorithm>
 #include <sstream>
 #include <thread>
 #include <mutex>
@@ -130,6 +131,9 @@ overflow: hidden; \
 static constexpr const char *S_PLAYLIST = "playlist";
 static constexpr const char *S_ALLOW_MIC = "allow_mic";
 static constexpr const char *S_MIC_DEVICE = "mic_device";
+static constexpr const char *S_ALLOW_VIDEO = "allow_video";
+static constexpr const char *S_VIDEO_SOURCE = "video_source";
+static constexpr const char *S_VIDEO_RESOLUTION = "video_resolution";
 static constexpr const char *BROWSER_MIC_DEFAULT = "default";
 static constexpr const char *BROWSER_SOURCE_ID = "browser_source";
 static constexpr const char *BROWSER_PLAYLIST_SOURCE_ID = "browser_playlist_source";
@@ -153,6 +157,9 @@ static void browser_source_get_defaults_internal(obs_data_t *settings, bool play
 	obs_data_set_default_bool(settings, "reroute_audio", false);
 	obs_data_set_default_bool(settings, S_ALLOW_MIC, false);
 	obs_data_set_default_string(settings, S_MIC_DEVICE, BROWSER_MIC_DEFAULT);
+	obs_data_set_default_bool(settings, S_ALLOW_VIDEO, false);
+	obs_data_set_default_string(settings, S_VIDEO_SOURCE, "");
+	obs_data_set_default_string(settings, S_VIDEO_RESOLUTION, "640x480");
 
 	if (playlist_source) {
 		obs_data_set_default_bool(settings, "looping", false);
@@ -197,6 +204,17 @@ static bool is_mic_enabled_modified(obs_properties_t *props, obs_property_t *, o
 	bool enabled = obs_data_get_bool(settings, S_ALLOW_MIC);
 	obs_property_t *micDevice = obs_properties_get(props, S_MIC_DEVICE);
 	obs_property_set_visible(micDevice, enabled);
+
+	return true;
+}
+
+static bool is_video_enabled_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	bool enabled = obs_data_get_bool(settings, S_ALLOW_VIDEO);
+	obs_property_t *videoSource = obs_properties_get(props, S_VIDEO_SOURCE);
+	obs_property_t *videoResolution = obs_properties_get(props, S_VIDEO_RESOLUTION);
+	obs_property_set_visible(videoSource, enabled);
+	obs_property_set_visible(videoResolution, enabled);
 
 	return true;
 }
@@ -282,6 +300,64 @@ static void AddBrowserMicDevices(obs_property_t *prop, const char *currentDevice
 		obs_property_list_add_string(prop, currentDevice, currentDevice);
 }
 
+static std::vector<std::string> GetBrowserVideoSources(obs_source_t *self)
+{
+	std::vector<std::string> sources;
+	struct enum_info {
+		std::vector<std::string> *sources;
+		obs_source_t *self;
+	} info = {&sources, self};
+
+	obs_enum_sources(
+		[](void *data, obs_source_t *source) {
+			enum_info *info = static_cast<enum_info *>(data);
+			if (source == info->self || obs_source_removed(source))
+				return true;
+			if ((obs_source_get_output_flags(source) & OBS_SOURCE_VIDEO) == 0)
+				return true;
+
+			const char *name = obs_source_get_name(source);
+			if (name && *name)
+				info->sources->emplace_back(name);
+			return true;
+		},
+		&info);
+
+	std::sort(sources.begin(), sources.end());
+	sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
+	return sources;
+}
+
+static void AddBrowserVideoSources(obs_property_t *prop, obs_source_t *self, const char *currentSource)
+{
+	bool currentFound = !currentSource || !*currentSource;
+	obs_property_list_add_string(prop, obs_module_text("None"), "");
+
+	for (const std::string &source : GetBrowserVideoSources(self)) {
+		obs_property_list_add_string(prop, source.c_str(), source.c_str());
+		if (currentSource && source == currentSource)
+			currentFound = true;
+	}
+
+	if (!currentFound)
+		obs_property_list_add_string(prop, currentSource, currentSource);
+}
+
+static void AddBrowserVideoResolutions(obs_property_t *prop, const char *currentResolution)
+{
+	static const char *resolutions[] = {"320x240", "640x360", "640x480", "1280x720", "1920x1080"};
+	bool currentFound = !currentResolution || !*currentResolution;
+
+	for (const char *resolution : resolutions) {
+		obs_property_list_add_string(prop, resolution, resolution);
+		if (currentResolution && strcmp(currentResolution, resolution) == 0)
+			currentFound = true;
+	}
+
+	if (!currentFound)
+		obs_property_list_add_string(prop, currentResolution, currentResolution);
+}
+
 static obs_properties_t *browser_source_get_properties_internal(void *data, bool playlist_source)
 {
 	obs_properties_t *props = obs_properties_create();
@@ -338,6 +414,23 @@ static obs_properties_t *browser_source_get_properties_internal(void *data, bool
 						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	AddBrowserMicDevices(micDevice, bs ? bs->mic_device.c_str() : nullptr);
 	obs_property_set_visible(micDevice, bs && bs->allow_mic);
+
+	obs_property_t *allowVideo = obs_properties_add_bool(props, S_ALLOW_VIDEO, obs_module_text("AllowVideoInput"));
+	obs_property_set_modified_callback(allowVideo, is_video_enabled_modified);
+
+	obs_property_t *videoSource = obs_properties_add_list(props, S_VIDEO_SOURCE, obs_module_text("VideoInputSource"),
+							 OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	AddBrowserVideoSources(videoSource, bs ? bs->source : nullptr, bs ? bs->video_source.c_str() : nullptr);
+	obs_property_set_visible(videoSource, bs && bs->allow_video);
+
+	std::string currentVideoResolution;
+	if (bs)
+		currentVideoResolution = std::to_string(bs->video_input_width) + "x" + std::to_string(bs->video_input_height);
+	obs_property_t *videoResolution = obs_properties_add_list(props, S_VIDEO_RESOLUTION,
+							     obs_module_text("VideoInputResolution"), OBS_COMBO_TYPE_LIST,
+							     OBS_COMBO_FORMAT_STRING);
+	AddBrowserVideoResolutions(videoResolution, currentVideoResolution.empty() ? nullptr : currentVideoResolution.c_str());
+	obs_property_set_visible(videoResolution, bs && bs->allow_video);
 
 	obs_property_t *fps_set = obs_properties_add_bool(props, "fps_custom", obs_module_text("CustomFrameRate"));
 	obs_property_set_modified_callback(fps_set, is_fps_custom);

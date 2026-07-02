@@ -73,7 +73,7 @@ CefRefPtr<CefAudioHandler> BrowserClient::GetAudioHandler()
 
 CefRefPtr<CefPermissionHandler> BrowserClient::GetPermissionHandler()
 {
-	return allow_mic ? this : nullptr;
+	return (allow_mic || allow_video) ? this : nullptr;
 }
 
 CefRefPtr<CefRequestHandler> BrowserClient::GetRequestHandler()
@@ -621,10 +621,14 @@ bool BrowserClient::OnRequestMediaAccessPermission(CefRefPtr<CefBrowser> browser
 	UNUSED_PARAMETER(requesting_origin);
 
 	const uint32_t micPermission = CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE;
-	const bool micOnly = (requested_permissions & micPermission) != 0 &&
-			     (requested_permissions & ~micPermission) == 0;
+	const uint32_t videoPermission = CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE;
+	const bool wantsMic = (requested_permissions & micPermission) != 0;
+	const bool wantsVideo = (requested_permissions & videoPermission) != 0;
+	const bool knownOnly = requested_permissions != 0 &&
+			       (requested_permissions & ~(micPermission | videoPermission)) == 0;
+	const bool permitted = valid() && knownOnly && (!wantsMic || allow_mic) && (!wantsVideo || allow_video);
 
-	if (valid() && allow_mic && micOnly)
+	if (permitted)
 		callback->Continue(requested_permissions);
 	else
 		callback->Cancel();
@@ -641,73 +645,178 @@ bool BrowserClient::OnShowPermissionPrompt(CefRefPtr<CefBrowser> browser, uint64
 	UNUSED_PARAMETER(requesting_origin);
 
 	const uint32_t micPermission = CEF_PERMISSION_TYPE_MIC_STREAM;
-	const bool micOnly = (requested_permissions & micPermission) != 0 &&
-			     (requested_permissions & ~micPermission) == 0;
+	const uint32_t videoPermission = CEF_PERMISSION_TYPE_CAMERA_STREAM;
+	const bool wantsMic = (requested_permissions & micPermission) != 0;
+	const bool wantsVideo = (requested_permissions & videoPermission) != 0;
+	const bool knownOnly = requested_permissions != 0 &&
+			       (requested_permissions & ~(micPermission | videoPermission)) == 0;
 
-	if (!micOnly)
+	if (!knownOnly)
 		return false;
 
-	callback->Continue(valid() && allow_mic ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
+	const bool permitted = valid() && (!wantsMic || allow_mic) && (!wantsVideo || allow_video);
+	callback->Continue(permitted ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
 	return true;
 }
 
-static std::string BrowserMicDeviceScript(const std::string &micDevice)
+static std::string BrowserMediaDeviceScript(const std::string &micDevice, bool allowVideo,
+						    const std::string &videoSource, int videoWidth, int videoHeight)
 {
-	if (micDevice.empty() || micDevice == "default")
+	const bool selectMic = !micDevice.empty() && micDevice != "default";
+	if (!selectMic && !allowVideo)
 		return std::string();
 
-	std::string desired = nlohmann::json(micDevice).dump();
-	return std::string("(() => {\n"
-			   "  const desired = ") +
-	       desired +
-	       ";\n"
-	       "  const mediaDevices = navigator.mediaDevices;\n"
-	       "  if (!mediaDevices || mediaDevices.__obsMicOverride) return;\n"
-	       "  const nativeGetUserMedia = mediaDevices.getUserMedia && mediaDevices.getUserMedia.bind(mediaDevices);\n"
-	       "  const nativeEnumerateDevices = mediaDevices.enumerateDevices && "
-	       "mediaDevices.enumerateDevices.bind(mediaDevices);\n"
-	       "  if (!nativeGetUserMedia || !nativeEnumerateDevices) return;\n"
-	       "  Object.defineProperty(mediaDevices, '__obsMicOverride', {value: true});\n"
-	       "  const desiredLower = desired.toLowerCase();\n"
-	       "  const stopTracks = (stream) => stream && stream.getTracks().forEach((track) => track.stop());\n"
-	       "  const findDevice = async () => {\n"
-	       "    let devices = await nativeEnumerateDevices();\n"
-	       "    let inputs = devices.filter((device) => device.kind === 'audioinput');\n"
-	       "    let match = inputs.find((device) => device.deviceId === desired || device.label === desired || "
-	       "device.label.toLowerCase().includes(desiredLower));\n"
-	       "    if (match || inputs.some((device) => device.label)) return match;\n"
-	       "    try {\n"
-	       "      const stream = await nativeGetUserMedia({audio: true, video: false});\n"
-	       "      stopTracks(stream);\n"
-	       "      devices = await nativeEnumerateDevices();\n"
-	       "      inputs = devices.filter((device) => device.kind === 'audioinput');\n"
-	       "      match = inputs.find((device) => device.deviceId === desired || device.label === desired || "
-	       "device.label.toLowerCase().includes(desiredLower));\n"
-	       "    } catch (error) {}\n"
-	       "    return match;\n"
-	       "  };\n"
-	       "  mediaDevices.getUserMedia = async (constraints = {}) => {\n"
-	       "    if (!constraints || constraints.audio === false) return nativeGetUserMedia(constraints);\n"
-	       "    const match = await findDevice();\n"
-	       "    if (!match) return nativeGetUserMedia(constraints);\n"
-	       "    const nextConstraints = Object.assign({}, constraints);\n"
-	       "    let audio = constraints.audio;\n"
-	       "    if (audio === true || audio === undefined) audio = {};\n"
-	       "    else if (typeof audio !== 'object') return nativeGetUserMedia(constraints);\n"
-	       "    else audio = Object.assign({}, audio);\n"
-	       "    audio.deviceId = {exact: match.deviceId};\n"
-	       "    nextConstraints.audio = audio;\n"
-	       "    return nativeGetUserMedia(nextConstraints);\n"
-	       "  };\n"
-	       "})();";
+	const int width = videoWidth > 0 ? videoWidth : 640;
+	const int height = videoHeight > 0 ? videoHeight : 480;
+	const std::string videoLabel = videoSource.empty() ? "OBS Source" : "OBS Source: " + videoSource;
+	const std::string micDeviceJson = nlohmann::json(selectMic ? micDevice : std::string()).dump();
+	const std::string videoLabelJson = nlohmann::json(videoLabel).dump();
+
+	return std::string(R"OBSJS((() => {
+  const obsMicDevice = )OBSJS") +
+	       micDeviceJson + R"OBSJS(;
+  const obsVideoEnabled = )OBSJS" +
+	       (allowVideo ? "true" : "false") + R"OBSJS(;
+  const obsVideoDeviceId = 'obs-browser-video-input';
+  const obsVideoLabel = )OBSJS" +
+	       videoLabelJson + R"OBSJS(;
+  const obsVideoWidth = )OBSJS" +
+	       std::to_string(width) + R"OBSJS(;
+  const obsVideoHeight = )OBSJS" +
+	       std::to_string(height) + R"OBSJS(;
+  const mediaDevices = navigator.mediaDevices;
+  if (!mediaDevices || mediaDevices.__obsMediaOverride) return;
+  const nativeGetUserMedia = mediaDevices.getUserMedia && mediaDevices.getUserMedia.bind(mediaDevices);
+  const nativeEnumerateDevices = mediaDevices.enumerateDevices && mediaDevices.enumerateDevices.bind(mediaDevices);
+  if (!nativeGetUserMedia) return;
+  Object.defineProperty(mediaDevices, '__obsMediaOverride', {value: true});
+
+  const stopTracks = (stream) => stream && stream.getTracks().forEach((track) => track.stop());
+  const findAudioDevice = async () => {
+    if (!obsMicDevice || !nativeEnumerateDevices) return null;
+    const desiredLower = obsMicDevice.toLowerCase();
+    let devices = await nativeEnumerateDevices();
+    let inputs = devices.filter((device) => device.kind === 'audioinput');
+    let match = inputs.find((device) => device.deviceId === obsMicDevice || device.label === obsMicDevice ||
+      device.label.toLowerCase().includes(desiredLower));
+    if (match || inputs.some((device) => device.label)) return match;
+    try {
+      const stream = await nativeGetUserMedia({audio: true, video: false});
+      stopTracks(stream);
+      devices = await nativeEnumerateDevices();
+      inputs = devices.filter((device) => device.kind === 'audioinput');
+      match = inputs.find((device) => device.deviceId === obsMicDevice || device.label === obsMicDevice ||
+        device.label.toLowerCase().includes(desiredLower));
+    } catch (error) {}
+    return match;
+  };
+
+  const withAudioDevice = async (constraints) => {
+    if (!obsMicDevice || !constraints || constraints.audio === false) return constraints;
+    const match = await findAudioDevice();
+    if (!match) return constraints;
+    const nextConstraints = Object.assign({}, constraints);
+    let audio = constraints.audio;
+    if (audio === true || audio === undefined) audio = {};
+    else if (typeof audio !== 'object') return constraints;
+    else audio = Object.assign({}, audio);
+    audio.deviceId = {exact: match.deviceId};
+    nextConstraints.audio = audio;
+    return nextConstraints;
+  };
+
+  const videoDevice = {
+    deviceId: obsVideoDeviceId,
+    groupId: 'obs-browser-video-input',
+    kind: 'videoinput',
+    label: obsVideoLabel,
+    toJSON() { return this; }
+  };
+
+  if (nativeEnumerateDevices && obsVideoEnabled) {
+    mediaDevices.enumerateDevices = async () => {
+      const devices = await nativeEnumerateDevices();
+      if (devices.some((device) => device.deviceId === obsVideoDeviceId)) return devices;
+      return devices.concat([videoDevice]);
+    };
+  }
+
+  const state = window.__obsBrowserVideoInput || {};
+  window.__obsBrowserVideoInput = state;
+  state.width = obsVideoWidth;
+  state.height = obsVideoHeight;
+
+  const resetCanvas = () => {
+    if (!state.canvas) state.canvas = document.createElement('canvas');
+    state.canvas.width = state.width;
+    state.canvas.height = state.height;
+    state.context = state.canvas.getContext('2d', {alpha: true});
+    state.context.clearRect(0, 0, state.width, state.height);
+    if (state.stream) {
+      state.stream.getTracks().forEach((track) => track.stop());
+      state.stream = null;
+    }
+  };
+
+  const ensureVideoStream = () => {
+    if (!obsVideoEnabled) return null;
+    if (!state.canvas || state.canvas.width !== state.width || state.canvas.height !== state.height) resetCanvas();
+    const tracks = state.stream ? state.stream.getVideoTracks() : [];
+    if (!state.stream || !tracks.length || tracks.every((track) => track.readyState === 'ended')) {
+      state.stream = state.canvas.captureStream(30);
+    }
+    return state.stream;
+  };
+
+  if (obsVideoEnabled) resetCanvas();
+
+  window.__obsBrowserVideoInputFrame = (width, height, buffer) => {
+    if (!obsVideoEnabled || !buffer) return;
+    if (!state.canvas || state.canvas.width !== width || state.canvas.height !== height) {
+      state.width = width;
+      state.height = height;
+      resetCanvas();
+    }
+    const pixels = new Uint8ClampedArray(buffer);
+    if (pixels.length < width * height * 4) return;
+    state.context.putImageData(new ImageData(pixels, width, height), 0, 0);
+  };
+
+  window.__obsBrowserVideoInputStop = () => {
+    if (state.context) state.context.clearRect(0, 0, state.width, state.height);
+  };
+
+  if (window.obsstudio) {
+    window.obsstudio.__obsBrowserVideoInputFrame = window.__obsBrowserVideoInputFrame;
+    window.obsstudio.__obsBrowserVideoInputStop = window.__obsBrowserVideoInputStop;
+  }
+
+  mediaDevices.getUserMedia = async (constraints = {}) => {
+    constraints = constraints || {};
+    const wantsVideo = !!constraints.video;
+    if (!obsVideoEnabled || !wantsVideo) {
+      return nativeGetUserMedia(await withAudioDevice(constraints));
+    }
+
+    const tracks = [];
+    if (constraints.audio) {
+      const audioStream = await nativeGetUserMedia(await withAudioDevice({audio: constraints.audio, video: false}));
+      tracks.push(...audioStream.getAudioTracks());
+    }
+
+    const videoStream = ensureVideoStream();
+    if (videoStream) tracks.push(...videoStream.getVideoTracks());
+    return new MediaStream(tracks);
+  };
+})();)OBSJS";
 }
 
 void BrowserClient::OnLoadStart(CefRefPtr<CefBrowser>, CefRefPtr<CefFrame> frame, TransitionType)
 {
-	if (!valid() || !allow_mic)
+	if (!valid() || (!allow_mic && !allow_video))
 		return;
 
-	std::string script = BrowserMicDeviceScript(mic_device);
+	std::string script = BrowserMediaDeviceScript(mic_device, allow_video, video_source, video_width, video_height);
 	if (!script.empty())
 		frame->ExecuteJavaScript(script, frame->GetURL(), 0);
 }

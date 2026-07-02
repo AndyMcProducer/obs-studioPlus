@@ -21,6 +21,7 @@
 #include "browser-scheme.hpp"
 #include "wide-string.hpp"
 #include <nlohmann/json.hpp>
+#include <obs.hpp>
 #include <util/platform.h>
 #include <util/threading.h>
 #include <QApplication>
@@ -28,6 +29,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <cstdlib>
 #include <functional>
 #include <thread>
 #include <mutex>
@@ -52,6 +54,9 @@ extern bool QueueCEFTask(std::function<void()> task);
 static mutex browser_list_mutex;
 static BrowserSource *first_browser = nullptr;
 static constexpr const char *S_PLAYLIST = "playlist";
+static constexpr const char *S_ALLOW_VIDEO = "allow_video";
+static constexpr const char *S_VIDEO_SOURCE = "video_source";
+static constexpr const char *S_VIDEO_RESOLUTION = "video_resolution";
 static constexpr const char *BROWSER_SOURCE_ID = "browser_source";
 static constexpr const char *BROWSER_PLAYLIST_SOURCE_ID = "browser_playlist_source";
 
@@ -75,6 +80,26 @@ static std::string LowerString(std::string str)
 {
 	std::transform(str.begin(), str.end(), str.begin(), [](unsigned char ch) { return (char)std::tolower(ch); });
 	return str;
+}
+
+static void ParseBrowserVideoResolution(const std::string &resolution, int &width, int &height)
+{
+	width = 640;
+	height = 480;
+
+	const char *value = resolution.c_str();
+	char *end = nullptr;
+	long parsedWidth = strtol(value, &end, 10);
+	if (!end || (*end != 'x' && *end != 'X'))
+		return;
+
+	char *heightEnd = nullptr;
+	long parsedHeight = strtol(end + 1, &heightEnd, 10);
+	if (heightEnd == end + 1 || parsedWidth <= 0 || parsedHeight <= 0)
+		return;
+
+	width = (int)parsedWidth;
+	height = (int)parsedHeight;
 }
 
 static bool EndsWith(const std::string &value, const std::string &suffix)
@@ -306,6 +331,7 @@ void BrowserSource::Destroy()
 	destroying = true;
 	DestroyTextures();
 	DestroyTransitionTexture();
+	DestroyVideoInputResources();
 
 	lock_guard<mutex> lock(browser_list_mutex);
 	if (next)
@@ -366,8 +392,8 @@ bool BrowserSource::CreateBrowser()
 #endif
 
 		CefRefPtr<BrowserClient> browserClient =
-			new BrowserClient(this, hwaccel && tex_sharing_avail, reroute_audio, allow_mic, mic_device,
-					  webpage_control_level);
+			new BrowserClient(this, hwaccel && tex_sharing_avail, reroute_audio, allow_mic, mic_device, allow_video,
+					  video_source, video_input_width, video_input_height, webpage_control_level);
 
 		CefWindowInfo windowInfo;
 		windowInfo.bounds.width = width;
@@ -653,6 +679,150 @@ void BrowserSource::PlaylistPrevious()
 	}
 }
 
+uint64_t BrowserSource::VideoInputFrameIntervalNs() const
+{
+	int frameRate = fps > 0 ? fps : 30;
+	if (frameRate < 1)
+		frameRate = 1;
+	else if (frameRate > 60)
+		frameRate = 60;
+	return 1000000000ULL / (uint64_t)frameRate;
+}
+
+bool BrowserSource::EnsureVideoInputResources()
+{
+	if (video_input_width <= 0 || video_input_height <= 0)
+		return false;
+
+	const size_t frameSize = (size_t)video_input_width * (size_t)video_input_height * 4;
+	if (video_input_render && video_input_stage && video_input_frame.size() == frameSize)
+		return true;
+
+	if (video_input_stage) {
+		gs_stagesurface_destroy(video_input_stage);
+		video_input_stage = nullptr;
+	}
+	if (video_input_render) {
+		gs_texrender_destroy(video_input_render);
+		video_input_render = nullptr;
+	}
+
+	video_input_render = gs_texrender_create(GS_RGBA, GS_ZS_NONE);
+	video_input_stage = gs_stagesurface_create((uint32_t)video_input_width, (uint32_t)video_input_height, GS_RGBA);
+	video_input_frame.assign(frameSize, 0);
+
+	return video_input_render && video_input_stage && !video_input_frame.empty();
+}
+
+void BrowserSource::SendVideoInputFrame()
+{
+	if (video_input_frame.empty())
+		return;
+
+	const int frameWidth = video_input_width;
+	const int frameHeight = video_input_height;
+	std::vector<uint8_t> frame = video_input_frame;
+
+	ExecuteOnBrowser(
+		[frame = std::move(frame), frameWidth, frameHeight](CefRefPtr<CefBrowser> cefBrowser) {
+			CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("ObsBrowserVideoFrame");
+			CefRefPtr<CefListValue> args = msg->GetArgumentList();
+			args->SetInt(0, frameWidth);
+			args->SetInt(1, frameHeight);
+			args->SetBinary(2, CefBinaryValue::Create(frame.data(), frame.size()));
+			SendBrowserProcessMessage(cefBrowser, PID_RENDERER, msg);
+		},
+		true);
+}
+
+void BrowserSource::StopVideoInputFrame()
+{
+	ExecuteOnBrowser(
+		[](CefRefPtr<CefBrowser> cefBrowser) {
+			CefRefPtr<CefProcessMessage> msg = CefProcessMessage::Create("ObsBrowserVideoStop");
+			SendBrowserProcessMessage(cefBrowser, PID_RENDERER, msg);
+		},
+		true);
+}
+
+void BrowserSource::RenderVideoInputFrame()
+{
+	if (!allow_video || video_source.empty() || destroying)
+		return;
+
+	const uint64_t now = os_gettime_ns();
+	const uint64_t interval = VideoInputFrameIntervalNs();
+	if (last_video_input_frame_ns && now - last_video_input_frame_ns < interval)
+		return;
+	last_video_input_frame_ns = now;
+
+	OBSSourceAutoRelease input = obs_get_source_by_name(video_source.c_str());
+	if (!input || input == source)
+		return;
+	if ((obs_source_get_output_flags(input) & OBS_SOURCE_VIDEO) == 0)
+		return;
+	if (!EnsureVideoInputResources())
+		return;
+
+	const uint32_t targetWidth = (uint32_t)video_input_width;
+	const uint32_t targetHeight = (uint32_t)video_input_height;
+	const uint32_t sourceWidth = obs_source_get_width(input);
+	const uint32_t sourceHeight = obs_source_get_height(input);
+	if (!sourceWidth || !sourceHeight)
+		return;
+
+	gs_texrender_reset(video_input_render);
+	gs_blend_state_push();
+	gs_blend_function(GS_BLEND_ONE, GS_BLEND_ZERO);
+
+	bool rendered = false;
+	if (gs_texrender_begin_with_color_space(video_input_render, targetWidth, targetHeight, GS_CS_SRGB)) {
+		struct vec4 clearColor;
+		vec4_zero(&clearColor);
+		gs_clear(GS_CLEAR_COLOR, &clearColor, 0.0f, 0);
+		gs_ortho(0.0f, (float)targetWidth, 0.0f, (float)targetHeight, -100.0f, 100.0f);
+
+		const float scale = std::min((float)targetWidth / (float)sourceWidth,
+					     (float)targetHeight / (float)sourceHeight);
+		const float drawWidth = (float)sourceWidth * scale;
+		const float drawHeight = (float)sourceHeight * scale;
+		const float x = ((float)targetWidth - drawWidth) * 0.5f;
+		const float y = ((float)targetHeight - drawHeight) * 0.5f;
+
+		gs_matrix_push();
+		gs_matrix_translate3f(x, y, 0.0f);
+		gs_matrix_scale3f(scale, scale, 1.0f);
+		obs_source_video_render(input);
+		gs_matrix_pop();
+
+		gs_texrender_end(video_input_render);
+		rendered = true;
+	}
+
+	gs_blend_state_pop();
+	if (!rendered)
+		return;
+
+	gs_texture_t *texture = gs_texrender_get_texture(video_input_render);
+	if (!texture)
+		return;
+
+	gs_stage_texture(video_input_stage, texture);
+
+	uint8_t *frameData = nullptr;
+	uint32_t frameLinesize = 0;
+	if (!gs_stagesurface_map(video_input_stage, &frameData, &frameLinesize))
+		return;
+
+	const size_t rowBytes = (size_t)targetWidth * 4;
+	for (uint32_t y = 0; y < targetHeight; y++) {
+		memcpy(video_input_frame.data() + (size_t)y * rowBytes, frameData + (size_t)y * frameLinesize, rowBytes);
+	}
+	gs_stagesurface_unmap(video_input_stage);
+
+	SendVideoInputFrame();
+}
+
 uint64_t BrowserSource::TransitionDurationNs() const
 {
 	return transition_ms > 0 ? (uint64_t)transition_ms * 1000000ULL : 0;
@@ -890,6 +1060,9 @@ void BrowserSource::Update(obs_data_t *settings)
 		bool n_restart;
 		bool n_reroute;
 		bool n_allow_mic;
+		bool n_allow_video;
+		int n_video_input_width;
+		int n_video_input_height;
 		ControlLevel n_webpage_control_level;
 		bool n_playlist_looping = false;
 		bool n_rewrite_youtube = false;
@@ -899,6 +1072,8 @@ void BrowserSource::Update(obs_data_t *settings)
 		std::string n_raw_url;
 		std::string n_css;
 		std::string n_mic_device;
+		std::string n_video_source;
+		std::string n_video_resolution;
 		std::vector<std::string> n_playlist;
 		bool playlist_changed = false;
 		bool playlist_selection_changed = false;
@@ -917,6 +1092,10 @@ void BrowserSource::Update(obs_data_t *settings)
 		n_mic_device = obs_data_get_string(settings, "mic_device");
 		if (n_mic_device.empty())
 			n_mic_device = "default";
+		n_allow_video = obs_data_get_bool(settings, S_ALLOW_VIDEO);
+		n_video_source = obs_data_get_string(settings, S_VIDEO_SOURCE);
+		n_video_resolution = obs_data_get_string(settings, S_VIDEO_RESOLUTION);
+		ParseBrowserVideoResolution(n_video_resolution, n_video_input_width, n_video_input_height);
 		n_webpage_control_level =
 			static_cast<ControlLevel>(obs_data_get_int(settings, "webpage_control_level"));
 
@@ -969,6 +1148,8 @@ void BrowserSource::Update(obs_data_t *settings)
 		if (n_is_local == is_local && n_fps_custom == fps_custom && n_fps == fps &&
 		    n_shutdown == shutdown_on_invisible && n_restart == restart && n_css == css && n_url == url &&
 		    n_reroute == reroute_audio && n_allow_mic == allow_mic && n_mic_device == mic_device &&
+		    n_allow_video == allow_video && n_video_source == video_source &&
+		    n_video_input_width == video_input_width && n_video_input_height == video_input_height &&
 		    n_webpage_control_level == webpage_control_level) {
 			if (playlist_source) {
 				if (playlist_changed)
@@ -1003,6 +1184,10 @@ void BrowserSource::Update(obs_data_t *settings)
 		reroute_audio = n_reroute;
 		allow_mic = n_allow_mic;
 		mic_device = n_mic_device;
+		allow_video = n_allow_video;
+		video_source = n_video_source;
+		video_input_width = n_video_input_width;
+		video_input_height = n_video_input_height;
 		webpage_control_level = n_webpage_control_level;
 		restart = n_restart;
 		css = n_css;
@@ -1021,6 +1206,8 @@ void BrowserSource::Update(obs_data_t *settings)
 	DestroyBrowser();
 	DestroyTextures();
 	ResetTransition();
+	DestroyVideoInputResources();
+	last_video_input_frame_ns = 0;
 
 	if (!shutdown_on_invisible || obs_source_showing(source))
 		create_browser = true;
@@ -1134,6 +1321,8 @@ static void DrawBrowserTexture(BrowserSource *bs, gs_texture_t *inputTexture, fl
 
 void BrowserSource::Render()
 {
+	RenderVideoInputFrame();
+
 	bool flip = false;
 	float currentOpacity = 1.0f;
 	float transitionOpacity = 0.0f;

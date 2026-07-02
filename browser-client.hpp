@@ -40,6 +40,10 @@ class BrowserClient : public CefClient,
 	bool reroute_audio = true;
 	bool allow_mic = false;
 	std::string mic_device;
+	bool allow_video = false;
+	std::string video_source;
+	int video_width = 640;
+	int video_height = 480;
 	ControlLevel webpage_control_level = DEFAULT_CONTROL_LEVEL;
 
 	inline bool valid() const;
@@ -57,11 +61,16 @@ public:
 	int frames_per_buffer;
 
 	inline BrowserClient(BrowserSource *bs_, bool sharing_avail, bool reroute_audio_, bool allow_mic_,
-			     const std::string &mic_device_, ControlLevel webpage_control_level_)
+			     const std::string &mic_device_, bool allow_video_, const std::string &video_source_,
+			     int video_width_, int video_height_, ControlLevel webpage_control_level_)
 		: sharing_available(sharing_avail),
 		  reroute_audio(reroute_audio_),
 		  allow_mic(allow_mic_),
 		  mic_device(mic_device_),
+		  allow_video(allow_video_),
+		  video_source(video_source_),
+		  video_width(video_width_),
+		  video_height(video_height_),
 		  webpage_control_level(webpage_control_level_),
 		  bs(bs_)
 	{
