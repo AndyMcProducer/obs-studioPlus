@@ -36,10 +36,15 @@ jobs:
               fi
               ;;
             push)
-              config_data=('codesign:true' 'notarize:false' 'package:true' 'config:RelWithDebInfo')
-              if [[ ${GITHUB_REF_NAME} =~ [0-9]+.[0-9]+.[0-9]+(-(rc|beta).+)? ]]; then
-                config_data[1]='notarize:true'
+              config_data=('codesign:false' 'notarize:false' 'package:true' 'config:RelWithDebInfo')
+              release_ref="${GITHUB_REF_NAME#v}"
+              if [[ "${release_ref}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+)?$ ||
+                "${release_ref}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-(rc|beta)[0-9]+(\+)?$ ]]; then
                 config_data[3]='config:Release'
+                if [[ ${GITHUB_REPOSITORY_OWNER} == 'obsproject' ]]; then
+                  config_data[0]='codesign:true'
+                  config_data[1]='notarize:true'
+                fi
               fi
               ;;
             workflow_dispatch)
@@ -248,6 +253,7 @@ jobs:
 
   flatpak-build:
     name: Flatpak 📦
+    if: github.repository_owner == 'obsproject'
     runs-on: ubuntu-24.04
     needs: check-event
     defaults:
