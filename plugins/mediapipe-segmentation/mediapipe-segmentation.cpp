@@ -27,7 +27,7 @@ MODULE_EXPORT const char *obs_module_description(void)
 #define S_MODEL_PATH "model_path"
 #define S_OUTPUT_MODE "output_mode"
 #define S_BACKGROUND_COLOR "background_color"
-#define S_THRESHOLD "threshold"
+#define S_SEGMENTATION_THRESHOLD "threshold"
 #define S_SOFTNESS "softness"
 #define S_BLUR_RADIUS "blur_radius"
 #define S_PROCESSING_INTERVAL "processing_interval"
@@ -288,7 +288,7 @@ static void filter_update(void *data, obs_data_t *settings)
 	}
 
 	filter->mode = (output_mode)obs_data_get_int(settings, S_OUTPUT_MODE);
-	filter->threshold = (float)obs_data_get_double(settings, S_THRESHOLD);
+	filter->threshold = (float)obs_data_get_double(settings, S_SEGMENTATION_THRESHOLD);
 	filter->softness = (float)obs_data_get_double(settings, S_SOFTNESS);
 	filter->blurRadius = (float)obs_data_get_double(settings, S_BLUR_RADIUS);
 	filter->processingInterval = (int)obs_data_get_int(settings, S_PROCESSING_INTERVAL);
@@ -303,7 +303,7 @@ static void filter_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, S_OUTPUT_MODE, OUTPUT_TRANSPARENT);
 	obs_data_set_default_int(settings, S_BACKGROUND_COLOR, 0x00FF00);
-	obs_data_set_default_double(settings, S_THRESHOLD, 0.50);
+	obs_data_set_default_double(settings, S_SEGMENTATION_THRESHOLD, 0.50);
 	obs_data_set_default_double(settings, S_SOFTNESS, 0.08);
 	obs_data_set_default_double(settings, S_BLUR_RADIUS, 8.0);
 	obs_data_set_default_int(settings, S_PROCESSING_INTERVAL, 1);
@@ -356,7 +356,7 @@ static obs_properties_t *filter_properties(void *data)
 	obs_property_set_modified_callback(mode, output_mode_modified);
 
 	obs_properties_add_color(props, S_BACKGROUND_COLOR, T_BACKGROUND_COLOR);
-	obs_properties_add_float_slider(props, S_THRESHOLD, T_THRESHOLD, 0.0, 1.0, 0.01);
+	obs_properties_add_float_slider(props, S_SEGMENTATION_THRESHOLD, T_THRESHOLD, 0.0, 1.0, 0.01);
 	obs_properties_add_float_slider(props, S_SOFTNESS, T_SOFTNESS, 0.0, 0.5, 0.01);
 	obs_properties_add_float_slider(props, S_BLUR_RADIUS, T_BLUR_RADIUS, 1.0, 32.0, 1.0);
 	obs_property_t *interval =
