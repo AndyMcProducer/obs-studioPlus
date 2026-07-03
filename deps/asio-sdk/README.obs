@@ -1,0 +1,9 @@
+This directory vendors the Steinberg ASIO SDK 2.3 source files needed by the
+OBS ASIO backend.
+
+The SDK's LICENSE.txt offers a GPLv3 option. This fork uses that GPLv3 option
+for the vendored SDK files; COPYING.GPLv3 contains the GPLv3 license text.
+
+The Steinberg ASIO logo artwork is intentionally not vendored because it is not
+needed for compilation. References to the ASIO name or logo remain subject to
+Steinberg's trademark and usage guidelines.

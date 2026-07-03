@@ -396,17 +396,38 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Install ASIO SDK 🎚️
+      - name: Validate ASIO SDK 🎚️
         env:
           ASIO_SDK_URL: ${{ secrets.ASIO_SDK_URL }}
           ASIO_SDK_TOKEN: ${{ secrets.ASIO_SDK_TOKEN }}
           ASIO_SDK_SHA256: ${{ secrets.ASIO_SDK_SHA256 }}
         run: |
           $ErrorActionPreference = 'Stop'
+
+          function Test-AsioSdk([string] $Path) {
+            if ( [string]::IsNullOrWhiteSpace($Path) ) {
+              return $false
+            }
+
+            foreach ( $requiredPath in @('common\asio.h', 'host\asiodrivers.cpp', 'host\pc\asiolist.cpp', 'LICENSE.txt') ) {
+              if ( -not (Test-Path -LiteralPath (Join-Path $Path $requiredPath)) ) {
+                return $false
+              }
+            }
+
+            return $true
+          }
+
+          $vendoredSdk = Join-Path $env:GITHUB_WORKSPACE 'deps\asio-sdk'
+          if ( Test-AsioSdk $vendoredSdk ) {
+            Write-Host "Using vendored ASIO SDK at ${vendoredSdk}."
+            return
+          }
+
           if ( [string]::IsNullOrWhiteSpace($env:ASIO_SDK_URL) ) {
-            $message = 'ASIO_SDK_URL is not set; Windows ASIO will build with stub support.'
+            $message = 'No vendored ASIO SDK or ASIO_SDK_URL secret was found; Windows ASIO will build with stub support.'
             if ( '${{ github.ref_type }}' -eq 'tag' ) {
-              throw "${message} Release tag builds require a private ASIO SDK archive."
+              throw "${message} Release tag builds require the vendored ASIO SDK or a private ASIO SDK archive."
             }
             Write-Warning $message
             return
@@ -454,8 +475,10 @@ jobs:
             Remove-Item -LiteralPath $sdkTarget -Recurse -Force
           }
           Copy-Item -LiteralPath $sdkSource -Destination $sdkTarget -Recurse
+          if ( -not (Test-AsioSdk $sdkTarget) ) {
+            throw "ASIO SDK installation at ${sdkTarget} is incomplete."
+          }
           Write-Host "Installed ASIO SDK to ${sdkTarget}."
-
       - name: Build OBS Studio 🧱
         uses: ./.github/actions/build-obs
         env:
