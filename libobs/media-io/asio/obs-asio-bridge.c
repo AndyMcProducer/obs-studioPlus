@@ -261,7 +261,8 @@ static void asio_bridge_output_cb(float **output, int num_channels, int num_fram
     }
 
     uint64_t available = bridge.output_write_index - bridge.output_read_index;
-    size_t tocopy = (size_t)(available >= (uint64_t)num_frames ? num_frames : available);
+    uint64_t requested = (uint64_t)num_frames;
+    size_t tocopy = (size_t)(available >= requested ? requested : available);
     size_t idx = (size_t)(bridge.output_read_index % bridge.ring_frames);
 
     if (tocopy > 0) {
