@@ -57,7 +57,6 @@ static constexpr const char *S_PLAYLIST = "playlist";
 static constexpr const char *S_ALLOW_VIDEO = "allow_video";
 static constexpr const char *S_VIDEO_SOURCE = "video_source";
 static constexpr const char *S_VIDEO_RESOLUTION = "video_resolution";
-static constexpr const char *BROWSER_SOURCE_ID = "browser_source";
 static constexpr const char *BROWSER_PLAYLIST_SOURCE_ID = "browser_playlist_source";
 
 static BrowserTransitionMode ClampBrowserTransitionMode(int mode)
