@@ -222,6 +222,9 @@ void OBSBasic::RefreshSceneListForCanvas()
 			ResizePreview(vci.base_width, vci.base_height);
 	} else {
 		/* Restore horizontal (main canvas) scene list */
+		obs_video_info ovi;
+		obs_get_video_info(&ovi);
+
 		ui->scenes->blockSignals(true);
 		sceneListSignals.clear();
 		ui->scenes->clear();
