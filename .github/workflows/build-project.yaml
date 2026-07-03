@@ -396,6 +396,66 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Install ASIO SDK 🎚️
+        env:
+          ASIO_SDK_URL: ${{ secrets.ASIO_SDK_URL }}
+          ASIO_SDK_TOKEN: ${{ secrets.ASIO_SDK_TOKEN }}
+          ASIO_SDK_SHA256: ${{ secrets.ASIO_SDK_SHA256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ( [string]::IsNullOrWhiteSpace($env:ASIO_SDK_URL) ) {
+            $message = 'ASIO_SDK_URL is not set; Windows ASIO will build with stub support.'
+            if ( '${{ github.ref_type }}' -eq 'tag' ) {
+              throw "${message} Release tag builds require a private ASIO SDK archive."
+            }
+            Write-Warning $message
+            return
+          }
+
+          $sdkRoot = 'C:\SDKs'
+          $sdkTarget = Join-Path $sdkRoot 'ASIOSDK'
+          $archive = Join-Path $env:RUNNER_TEMP 'asio-sdk.zip'
+          $extractRoot = Join-Path $env:RUNNER_TEMP 'asio-sdk'
+          New-Item -ItemType Directory -Path $sdkRoot -Force | Out-Null
+          if ( Test-Path -LiteralPath $extractRoot ) {
+            Remove-Item -LiteralPath $extractRoot -Recurse -Force
+          }
+
+          $headers = @{}
+          if ( -not [string]::IsNullOrWhiteSpace($env:ASIO_SDK_TOKEN) ) {
+            $headers['Authorization'] = "Bearer $env:ASIO_SDK_TOKEN"
+          }
+          Invoke-WebRequest -Uri $env:ASIO_SDK_URL -Headers $headers -OutFile $archive
+
+          if ( -not [string]::IsNullOrWhiteSpace($env:ASIO_SDK_SHA256) ) {
+            $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+            $expectedHash = $env:ASIO_SDK_SHA256.Trim().ToLowerInvariant()
+            if ( $actualHash -ne $expectedHash ) {
+              throw "ASIO SDK archive hash mismatch. Expected ${expectedHash}, got ${actualHash}."
+            }
+          }
+
+          Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot
+          $sdkHeader = Get-ChildItem -LiteralPath $extractRoot -Recurse -Filter asio.h |
+            Where-Object { $_.FullName -like '*\common\asio.h' } |
+            Select-Object -First 1
+          if ( $null -eq $sdkHeader ) {
+            throw 'ASIO SDK archive must contain common\asio.h.'
+          }
+
+          $sdkSource = Split-Path -Parent (Split-Path -Parent $sdkHeader.FullName)
+          foreach ( $requiredPath in @('host\asiodrivers.cpp', 'host\pc\asiolist.cpp') ) {
+            if ( -not (Test-Path -LiteralPath (Join-Path $sdkSource $requiredPath)) ) {
+              throw "ASIO SDK archive is missing ${requiredPath}."
+            }
+          }
+
+          if ( Test-Path -LiteralPath $sdkTarget ) {
+            Remove-Item -LiteralPath $sdkTarget -Recurse -Force
+          }
+          Copy-Item -LiteralPath $sdkSource -Destination $sdkTarget -Recurse
+          Write-Host "Installed ASIO SDK to ${sdkTarget}."
+
       - name: Build OBS Studio 🧱
         uses: ./.github/actions/build-obs
         env:

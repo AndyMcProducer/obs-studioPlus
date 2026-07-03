@@ -26,6 +26,28 @@ const char *obs_asio_get_device_name(int index)
     return NULL;
 }
 
+int obs_asio_get_input_channel_count(void)
+{
+    return 0;
+}
+
+const char *obs_asio_get_input_channel_name(int index)
+{
+    (void)index;
+    return NULL;
+}
+
+int obs_asio_get_output_channel_count(void)
+{
+    return 0;
+}
+
+const char *obs_asio_get_output_channel_name(int index)
+{
+    (void)index;
+    return NULL;
+}
+
 bool obs_asio_open_control_panel(const char *device_name)
 {
     (void)device_name;
@@ -44,6 +66,12 @@ bool obs_asio_initialize(struct obs_asio_context *ctx, long sample_rate, long bu
 }
 
 void obs_asio_set_audio_callback(struct obs_asio_context *ctx, obs_asio_audio_callback_t cb, void *user_data)
+{
+    (void)ctx; (void)cb; (void)user_data;
+}
+
+void obs_asio_set_output_callback(struct obs_asio_context *ctx, obs_asio_audio_output_callback_t cb,
+                                  void *user_data)
 {
     (void)ctx; (void)cb; (void)user_data;
 }
