@@ -285,6 +285,8 @@ function(set_target_properties_obs target)
       )
 
       if(target STREQUAL obs-browser)
+        target_compile_options(${target} PRIVATE -Wno-error=unused-const-variable)
+
         # Good-enough for now as there are no other variants - in _theory_ we should only add the appropriate variant,
         # but that is only known at project generation and not build system configuration.
         get_target_property(imported_location CEF::Library IMPORTED_LOCATION_RELEASE)
