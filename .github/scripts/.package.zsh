@@ -161,10 +161,11 @@ package() {
         return 2
       }
 
-      typeset -gx CODESIGN_IDENT="${CODESIGN_IDENT:--}"
-      typeset -gx CODESIGN_TEAM="$(print "${CODESIGN_IDENT}" | /usr/bin/sed -En 's/.+\((.+)\)/\1/p')"
-
-      codesign --sign "${CODESIGN_IDENT}" ${output_name}.dmg
+      if (( codesign )) {
+        typeset -gx CODESIGN_IDENT="${CODESIGN_IDENT:--}"
+        typeset -gx CODESIGN_TEAM="$(print "${CODESIGN_IDENT}" | /usr/bin/sed -En 's/.+\((.+)\)/\1/p')"
+        codesign --sign "${CODESIGN_IDENT}" ${output_name}.dmg
+      }
 
       if (( codesign && notarize )) {
         if ! [[ ${CODESIGN_IDENT} != '-' && ${CODESIGN_TEAM} && ${CODESIGN_IDENT_USER} && ${CODESIGN_IDENT_PASS} ]] {
