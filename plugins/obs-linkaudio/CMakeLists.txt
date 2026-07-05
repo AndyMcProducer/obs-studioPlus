@@ -32,7 +32,7 @@ target_sources(
 
 target_include_directories(
   obs-linkaudio
-  PRIVATE
+  SYSTEM PRIVATE
     "${LINK_AUDIO_ROOT}/libs/core"
     "${ABLETON_LINK_ROOT}/include"
     "${ABLETON_LINK_ROOT}/modules/asio-standalone/asio/include"
@@ -40,6 +40,13 @@ target_include_directories(
 
 target_compile_features(obs-linkaudio PRIVATE cxx_std_17)
 target_compile_definitions(obs-linkaudio PRIVATE ASIO_STANDALONE ASIO_NO_DEPRECATED)
+target_compile_options(
+  obs-linkaudio
+  PRIVATE
+    $<$<COMPILE_LANG_AND_ID:CXX,AppleClang,Clang,GNU>:-Wno-error=multichar>
+    $<$<COMPILE_LANG_AND_ID:CXX,AppleClang,Clang,GNU>:-Wno-error=unused-parameter>
+    $<$<COMPILE_LANG_AND_ID:CXX,AppleClang,Clang,GNU>:-Wno-error=unused-variable>
+)
 
 if(OS_WINDOWS)
   target_compile_definitions(

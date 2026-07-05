@@ -40,6 +40,7 @@ if(ENABLE_VST3)
     "${VST3_SDK_ROOT}/pluginterfaces/base/coreiids.cpp"
     "${VST3_SDK_ROOT}/pluginterfaces/base/funknown.cpp"
     "${VST3_SDK_ROOT}/pluginterfaces/base/ustring.cpp"
+    "${VST3_SDK_ROOT}/public.sdk/source/common/commonstringconvert.cpp"
     "${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/connectionproxy.cpp"
     "${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/eventlist.cpp"
     "${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/hostclasses.cpp"
@@ -53,11 +54,26 @@ if(ENABLE_VST3)
   )
 
   if(OS_MACOS)
-    target_sources(obs-vst3-sdk PRIVATE "${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm")
+    target_sources(
+      obs-vst3-sdk
+      PRIVATE
+        "${VST3_SDK_ROOT}/public.sdk/source/common/threadchecker_mac.mm"
+        "${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm"
+    )
   elseif(OS_WINDOWS)
-    target_sources(obs-vst3-sdk PRIVATE "${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_win32.cpp")
+    target_sources(
+      obs-vst3-sdk
+      PRIVATE
+        "${VST3_SDK_ROOT}/public.sdk/source/common/threadchecker_win32.cpp"
+        "${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_win32.cpp"
+    )
   elseif(OS_LINUX OR OS_FREEBSD OR OS_OPENBSD)
-    target_sources(obs-vst3-sdk PRIVATE "${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_linux.cpp")
+    target_sources(
+      obs-vst3-sdk
+      PRIVATE
+        "${VST3_SDK_ROOT}/public.sdk/source/common/threadchecker_linux.cpp"
+        "${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_linux.cpp"
+    )
   endif()
 
   target_include_directories(obs-vst3-sdk PUBLIC "${VST3_SDK_ROOT}")
@@ -68,7 +84,7 @@ if(ENABLE_VST3)
   if(OS_MACOS)
     set_source_files_properties(
       "${VST3_SDK_ROOT}/public.sdk/source/vst/hosting/module_mac.mm"
-      PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+      PROPERTIES COMPILE_FLAGS "-fobjc-arc -Wno-error=unused-parameter"
     )
   endif()
 endif()
