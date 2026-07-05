@@ -11,3 +11,6 @@
 [submodule "deps/vst3sdk"]
 	path = deps/vst3sdk
 	url = https://github.com/steinbergmedia/vst3sdk.git
+[submodule "deps/ofxAbletonLinkAudio"]
+	path = deps/ofxAbletonLinkAudio
+	url = https://github.com/gluon/ofxAbletonLinkAudio.git
