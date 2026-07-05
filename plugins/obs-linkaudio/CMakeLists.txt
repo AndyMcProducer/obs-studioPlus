@@ -34,6 +34,13 @@ target_include_directories(
   obs-linkaudio
   PRIVATE
     "${LINK_AUDIO_ROOT}/libs/core"
+)
+
+# Mark Ableton Link and ASIO headers as SYSTEM includes to suppress warnings from
+# third-party code (e.g. multi-character character constants, unused parameters).
+target_include_directories(
+  obs-linkaudio
+  SYSTEM PRIVATE
     "${ABLETON_LINK_ROOT}/include"
     "${ABLETON_LINK_ROOT}/modules/asio-standalone/asio/include"
 )
