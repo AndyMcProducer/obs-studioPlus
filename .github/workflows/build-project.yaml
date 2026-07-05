@@ -253,7 +253,7 @@ jobs:
 
   flatpak-build:
     name: Flatpak 📦
-    if: github.repository_owner == 'obsproject'
+    if: github.event_name == 'push' || github.repository_owner == 'obsproject'
     runs-on: ubuntu-24.04
     needs: check-event
     defaults:
@@ -354,6 +354,13 @@ jobs:
           restore-cache: ${{ fromJSON(steps.setup.outputs.cacheHit) }}
           cache-key: ${{ steps.setup.outputs.cacheKey }}
           mirror-screenshots-url: https://dl.flathub.org/media
+
+      - name: Upload Flatpak Artifact 📡
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ fromJSON(needs.check-event.outputs.package) }}
+        with:
+          name: obs-studio-flatpak-${{ needs.check-event.outputs.commitHash }}
+          path: ${{ github.workspace }}/obs-studio-flatpak-${{ needs.check-event.outputs.commitHash }}.flatpak
 
       - name: Validate AppStream
         uses: ./.github/actions/flatpak-builder-lint

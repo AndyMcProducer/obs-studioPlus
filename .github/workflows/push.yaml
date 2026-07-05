@@ -266,6 +266,7 @@ jobs:
           ubuntu_2404_sources_name="obs-studio-ubuntu-24.04-sources-${commit_hash}"
           windows_x64_artifact_name="obs-studio-windows-x64-${commit_hash}"
           windows_arm64_artifact_name="obs-studio-windows-arm64-${commit_hash}"
+          flatpak_artifact_name="obs-studio-flatpak-${commit_hash}"
 
           echo '::group::Renaming Artifacts'
           mv -v "${macos_arm64_artifact_name}/"obs-studio-*-macos-apple.dmg \
@@ -286,6 +287,8 @@ jobs:
             "${root_dir}"/OBS-Studio-${{ steps.check.outputs.version }}-Windows-x64.zip
           mv -v "${windows_arm64_artifact_name}/"obs-studio-*-windows-arm64.zip \
             "${root_dir}"/OBS-Studio-${{ steps.check.outputs.version }}-Windows-arm64.zip
+          mv -v "${flatpak_artifact_name}/"obs-studio-flatpak-"${commit_hash}".flatpak \
+            "${root_dir}"/OBS-Studio-${{ steps.check.outputs.version }}-Flatpak-x86_64.flatpak
           echo '::endgroup::'
 
       - name: Generate Checksums 🪪
@@ -296,7 +299,7 @@ jobs:
           shopt -s extglob
 
           echo "### Checksums" > ${{ github.workspace }}/CHECKSUMS.txt
-          for file in ${{ github.workspace }}/@(*.deb|*.ddeb|*.dmg|*.tar.xz|*.tar.gz|*.exe|*.zip); do
+          for file in ${{ github.workspace }}/@(*.deb|*.ddeb|*.dmg|*.flatpak|*.tar.xz|*.tar.gz|*.exe|*.zip); do
             echo "    ${file##*/}: $(sha256sum "${file}" | cut -d " " -f 1)" >> ${{ github.workspace }}/CHECKSUMS.txt
           done
 
@@ -318,3 +321,4 @@ jobs:
             ${{ github.workspace }}/OBS-Studio-${{ steps.check.outputs.version }}-Sources.tar.gz
             ${{ github.workspace }}/OBS-Studio-${{ steps.check.outputs.version }}-Windows-x64.zip
             ${{ github.workspace }}/OBS-Studio-${{ steps.check.outputs.version }}-Windows-arm64.zip
+            ${{ github.workspace }}/OBS-Studio-${{ steps.check.outputs.version }}-Flatpak-x86_64.flatpak
