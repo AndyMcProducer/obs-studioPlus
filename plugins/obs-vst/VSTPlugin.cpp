@@ -17,6 +17,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 *****************************************************************************/
 
 #include "headers/VSTPlugin.h"
+#ifdef OBS_VST3_ENABLED
+#include "headers/VST3Plugin.h"
+#endif
+#include <QString>
 #include <util/platform.h>
 
 intptr_t VSTPlugin::hostCallback_static(AEffect *effect, int32_t opcode, int32_t index, intptr_t value, void *ptr,
@@ -79,6 +83,13 @@ float VSTPlugin::GetSampleRate()
 	return mTimeInfo.sampleRate;
 }
 
+#ifdef OBS_VST3_ENABLED
+static bool isVST3Path(const std::string &path)
+{
+	return QString::fromStdString(path).endsWith(".vst3", Qt::CaseInsensitive);
+}
+#endif
+
 VSTPlugin::VSTPlugin(obs_source_t *sourceContext) : sourceContext{sourceContext} {}
 
 VSTPlugin::~VSTPlugin()
@@ -139,6 +150,23 @@ void VSTPlugin::loadEffectFromPath(const std::string &path)
 		unloadEffect();
 		blog(LOG_INFO, "User selected new VST plugin: '%s'", path.c_str());
 	}
+
+#ifdef OBS_VST3_ENABLED
+	if (isVST3Path(path)) {
+		pluginPath = path;
+		if (!vst3Plugin)
+			vst3Plugin = std::make_unique<VST3Plugin>();
+
+		if (!vst3Plugin->loaded() && !vst3Plugin->load(path)) {
+			pluginPath.clear();
+			return;
+		}
+
+		if (openInterfaceWhenActive)
+			openEditor();
+		return;
+	}
+#endif
 
 	if (!effect) {
 		// TODO: alert user of error if VST is not available.
@@ -225,6 +253,11 @@ static void silenceChannel(float **channelData, size_t numChannels, long numFram
 
 obs_audio_data *VSTPlugin::process(struct obs_audio_data *audio)
 {
+#ifdef OBS_VST3_ENABLED
+	if (vst3Plugin && vst3Plugin->loaded())
+		return vst3Plugin->process(audio);
+#endif
+
 	// Here we check the status firstly,
 	// which help avoid waiting for lock while unloadEffect() is running.
 	bool effectValid = (effect && effectReady && numChannels > 0);
@@ -268,6 +301,11 @@ void VSTPlugin::unloadEffect()
 {
 	closeEditor();
 
+#ifdef OBS_VST3_ENABLED
+	if (vst3Plugin)
+		vst3Plugin->unload();
+#endif
+
 	{
 		std::lock_guard<std::recursive_mutex> lock(lockEffect);
 
@@ -308,6 +346,13 @@ void VSTPlugin::onEditorClosed()
 
 void VSTPlugin::openEditor()
 {
+#ifdef OBS_VST3_ENABLED
+	if (vst3Plugin && vst3Plugin->loaded()) {
+		blog(LOG_WARNING, "VST3 Plug-in editor UI is not supported yet. Audio processing is active.");
+		return;
+	}
+#endif
+
 	if (effect && !editorWidget) {
 		// This check logic is refer to open source project : Audacity
 		if (!(effect->flags & effFlagsHasEditor)) {
@@ -346,6 +391,11 @@ std::string VSTPlugin::getEffectPath()
 
 std::string VSTPlugin::getChunk()
 {
+#ifdef OBS_VST3_ENABLED
+	if (vst3Plugin && vst3Plugin->loaded())
+		return vst3Plugin->getState();
+#endif
+
 	if (!effect) {
 		return "";
 	}
@@ -373,6 +423,13 @@ std::string VSTPlugin::getChunk()
 
 void VSTPlugin::setChunk(const std::string &data)
 {
+#ifdef OBS_VST3_ENABLED
+	if (vst3Plugin && vst3Plugin->loaded()) {
+		vst3Plugin->setState(data);
+		return;
+	}
+#endif
+
 	if (!effect) {
 		return;
 	}

@@ -199,8 +199,7 @@
         "VIRTUALCAM_GUID": {"type": "STRING", "value": "A3FCE0F5-3493-419F-958A-ABA1250EC20B"},
         "ENABLE_AJA": false,
         "ENABLE_BROWSER": true,
-        "ENABLE_SCRIPTING": false,
-        "ENABLE_VST": false
+        "ENABLE_SCRIPTING": false
       }
     },
     {

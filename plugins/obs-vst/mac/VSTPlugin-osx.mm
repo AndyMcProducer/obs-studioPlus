@@ -16,6 +16,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 *****************************************************************************/
 
 #include "../headers/VSTPlugin.h"
+#ifdef OBS_VST3_ENABLED
+#include "../headers/VST3Plugin.h"
+#endif
 
 AEffect *VSTPlugin::loadEffect()
 {
@@ -88,5 +91,9 @@ void VSTPlugin::unloadLibrary()
 
 bool VSTPlugin::vstLoaded()
 {
+#ifdef OBS_VST3_ENABLED
+    if (vst3Plugin && vst3Plugin->loaded())
+        return true;
+#endif
     return (bundle != NULL);
 }

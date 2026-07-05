@@ -16,6 +16,9 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 *****************************************************************************/
 #include "../headers/VSTPlugin.h"
+#ifdef OBS_VST3_ENABLED
+#include "../headers/VST3Plugin.h"
+#endif
 #include "../headers/vst-plugin-callbacks.hpp"
 
 #include <util/platform.h>
@@ -88,5 +91,9 @@ void VSTPlugin::unloadLibrary()
 
 bool VSTPlugin::vstLoaded()
 {
+#ifdef OBS_VST3_ENABLED
+	if (vst3Plugin && vst3Plugin->loaded())
+		return true;
+#endif
 	return (dllHandle != nullptr);
 }

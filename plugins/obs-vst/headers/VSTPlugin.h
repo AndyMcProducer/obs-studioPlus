@@ -23,6 +23,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #include <mutex>
 #include <atomic>
+#include <memory>
 #include <string>
 #include <QDirIterator>
 #include <obs-module.h>
@@ -35,6 +36,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #endif
 
 class EditorWidget;
+#ifdef OBS_VST3_ENABLED
+class VST3Plugin;
+#endif
 
 class VSTPlugin : public QObject {
 	Q_OBJECT
@@ -44,6 +48,9 @@ class VSTPlugin : public QObject {
 	2. close/delete effect object any where. */
 	std::recursive_mutex lockEffect;
 	AEffect *effect = nullptr;
+#ifdef OBS_VST3_ENABLED
+	std::unique_ptr<VST3Plugin> vst3Plugin;
+#endif
 	obs_source_t *sourceContext;
 	std::string pluginPath;
 

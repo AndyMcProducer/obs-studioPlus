@@ -165,6 +165,10 @@ static void fill_out_plugins(obs_property_t *list)
 #ifdef __APPLE__
 	dir_list << "/Library/Audio/Plug-Ins/VST/"
 		 << "~/Library/Audio/Plug-ins/VST/";
+#ifdef OBS_VST3_ENABLED
+	dir_list << "/Library/Audio/Plug-Ins/VST3/"
+		 << "~/Library/Audio/Plug-ins/VST3/";
+#endif
 #elif WIN32
 #ifndef _WIN64
 	HANDLE hProcess = GetCurrentProcess();
@@ -178,6 +182,10 @@ static void fill_out_plugins(obs_property_t *list)
 			 << qEnvironmentVariable("CommonProgramFiles") + "/Steinberg/Shared Components/"
 			 << qEnvironmentVariable("CommonProgramFiles") + "/VST2"
 			 << qEnvironmentVariable("CommonProgramFiles") + "/Steinberg/VST2"
+#ifdef OBS_VST3_ENABLED
+			 << qEnvironmentVariable("CommonProgramFiles") + "/VST3/"
+			 << qEnvironmentVariable("LocalAppData") + "/Programs/Common/VST3/"
+#endif
 			 << qEnvironmentVariable("CommonProgramFiles") + "/VSTPlugins/"
 			 << qEnvironmentVariable("ProgramFiles") + "/VSTPlugins/";
 #ifndef _WIN64
@@ -185,6 +193,9 @@ static void fill_out_plugins(obs_property_t *list)
 		dir_list << qEnvironmentVariable("ProgramFiles(x86)") + "/Steinberg/VstPlugins/"
 			 << qEnvironmentVariable("CommonProgramFiles(x86)") + "/Steinberg/Shared Components/"
 			 << qEnvironmentVariable("CommonProgramFiles(x86)") + "/VST2"
+#ifdef OBS_VST3_ENABLED
+			 << qEnvironmentVariable("CommonProgramFiles(x86)") + "/VST3/"
+#endif
 			 << qEnvironmentVariable("CommonProgramFiles(x86)") + "/VSTPlugins/"
 			 << qEnvironmentVariable("ProgramFiles(x86)") + "/VSTPlugins/";
 	}
@@ -216,17 +227,39 @@ static void fill_out_plugins(obs_property_t *list)
 		         << home + "/.lxvst/";
 		// clang-format on
 	}
+#ifdef OBS_VST3_ENABLED
+	QString vst3PathEnv(getenv("VST3_PATH"));
+	if (!vst3PathEnv.isNull()) {
+		dir_list.append(vst3PathEnv.split(":"));
+	} else {
+		QString home(getenv("HOME"));
+		dir_list << "/usr/lib/vst3/"
+			 << "/usr/lib64/vst3/"
+			 << "/usr/local/lib/vst3/"
+			 << "/usr/local/lib64/vst3/"
+			 << home + "/.vst3/";
+	}
+#endif
 #endif
 
 	QStringList filters;
 
 #ifdef __APPLE__
 	filters << "*.vst";
+#ifdef OBS_VST3_ENABLED
+	filters << "*.vst3";
+#endif
 #elif WIN32
 	filters << "*.dll";
+#ifdef OBS_VST3_ENABLED
+	filters << "*.vst3";
+#endif
 #elif __linux__
 	filters << "*.so"
 		<< "*.o";
+#ifdef OBS_VST3_ENABLED
+	filters << "*.vst3";
+#endif
 #endif
 
 	QStringList vst_list;
@@ -235,11 +268,22 @@ static void fill_out_plugins(obs_property_t *list)
 	for (int a = 0; a < dir_list.size(); ++a) {
 		QDir search_dir(dir_list[a]);
 		search_dir.setNameFilters(filters);
+		search_dir.setFilter(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
 		QDirIterator it(search_dir, QDirIterator::Subdirectories | QDirIterator::FollowSymlinks);
 		while (it.hasNext()) {
 			QString path = it.next();
+#ifdef OBS_VST3_ENABLED
+			QString normalizedPath = QDir::fromNativeSeparators(path);
+			if (normalizedPath.contains(".vst3/", Qt::CaseInsensitive))
+				continue;
+#endif
 			QString name = it.fileName();
 
+#ifdef OBS_VST3_ENABLED
+			if (name.endsWith(".vst3", Qt::CaseInsensitive)) {
+				name.chop(5);
+			} else
+#endif
 #ifdef __APPLE__
 			name.remove(".vst", Qt::CaseInsensitive);
 #elif WIN32
