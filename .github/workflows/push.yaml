@@ -308,10 +308,10 @@ jobs:
         id: create_release
         uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191
         with:
-          draft: true
+          draft: false
           prerelease: ${{ fromJSON(steps.check.outputs.prerelease) }}
           tag_name: ${{ github.ref_name }}
-          name: OBS Studio ${{ steps.check.outputs.version }}
+          name: OBS Studio ${{ steps.check.outputs.version }} Ableton Link
           body_path: ${{ github.workspace }}/CHECKSUMS.txt
           files: |
             ${{ github.workspace }}/OBS-Studio-${{ steps.check.outputs.version }}-macOS-*.dmg
