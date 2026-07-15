@@ -298,7 +298,16 @@ jobs:
           if [[ "${RUNNER_DEBUG}" ]]; then set -x; fi
           shopt -s extglob
 
-          echo "### Checksums" > ${{ github.workspace }}/CHECKSUMS.txt
+          cat > ${{ github.workspace }}/CHECKSUMS.txt <<'EOF'
+          ### Ubuntu .deb install
+          Install the Ubuntu package with `apt` so dependencies are installed automatically:
+
+              sudo apt install ./OBS-Studio-${{ steps.check.outputs.version }}-Ubuntu-24.04-x86_64.deb
+
+          Do not install it with `dpkg -i`; `dpkg` only reports missing dependencies and does not fetch them.
+
+          ### Checksums
+          EOF
           for file in ${{ github.workspace }}/@(*.deb|*.ddeb|*.dmg|*.flatpak|*.tar.xz|*.tar.gz|*.exe|*.zip); do
             echo "    ${file##*/}: $(sha256sum "${file}" | cut -d " " -f 1)" >> ${{ github.workspace }}/CHECKSUMS.txt
           done

@@ -355,6 +355,9 @@ jobs:
           cache-key: ${{ steps.setup.outputs.cacheKey }}
           mirror-screenshots-url: https://dl.flathub.org/media
 
+      - name: Verify Flatpak library dependencies
+        run: bash .github/scripts/verify-flatpak-libraries flatpak_app
+
       - name: Upload Flatpak Artifact 📡
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: ${{ fromJSON(needs.check-event.outputs.package) }}

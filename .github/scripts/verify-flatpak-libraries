@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+build_dir="${1:-flatpak_app}"
+
+flatpak build "${build_dir}" bash -euo pipefail <<'EOF'
+missing=0
+while IFS= read -r -d '' file; do
+  output="$(ldd "${file}" 2>/dev/null || true)"
+  unresolved="$(awk '/not found/ { missing = missing ? missing ", " $1 : $1 } END { print missing }' <<< "${output}")"
+  if [[ "${unresolved}" ]]; then
+    printf '::error file=%s::Missing shared libraries: %s\n' "${file}" "${unresolved}"
+    missing=1
+  fi
+done < <(find /app/bin /app/lib -type f -print0)
+exit "${missing}"
+EOF
